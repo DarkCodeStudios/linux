@@ -5,6 +5,8 @@
  * Copyright IBM Corp. 2015
  * Author(s): Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
  */
+
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/cpu.h>
 #include <linux/sched.h>
@@ -113,7 +115,7 @@ void load_fpu_state(struct fpu *state, int flags)
 	int mask;
 
 	if (flags & KERNEL_FPC)
-		fpu_lfpc(&state->fpc);
+		fpu_lfpc_safe(&state->fpc);
 	if (!cpu_has_vx()) {
 		if (flags & KERNEL_VXR_V0V7)
 			load_fp_regs_vx(state->vxrs);

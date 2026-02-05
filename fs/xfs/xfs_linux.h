@@ -69,7 +69,7 @@ typedef __u32			xfs_nlink_t;
 #include <asm/param.h>
 #include <linux/uaccess.h>
 #include <asm/byteorder.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "xfs_fs.h"
 #include "xfs_stats.h"
@@ -89,8 +89,6 @@ typedef __u32			xfs_nlink_t;
 #undef XFS_NATIVE_HOST
 #endif
 
-#define irix_sgid_inherit	xfs_params.sgid_inherit.val
-#define irix_symlink_mode	xfs_params.symlink_mode.val
 #define xfs_panic_mask		xfs_params.panic_mask.val
 #define xfs_error_level		xfs_params.error_level.val
 #define xfs_syncd_centisecs	xfs_params.syncd_timer.val
@@ -134,8 +132,6 @@ typedef __u32			xfs_nlink_t;
  * return, which throws off the reported address.
  */
 #define __this_address	({ __label__ __here; __here: barrier(); &&__here; })
-
-#define XFS_PROJID_DEFAULT	0
 
 #define howmany(x, y)	(((x)+((y)-1))/(y))
 

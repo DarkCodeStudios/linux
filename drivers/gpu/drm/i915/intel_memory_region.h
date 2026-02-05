@@ -38,11 +38,6 @@ enum intel_region_id {
 	INTEL_REGION_UNKNOWN, /* Should be last */
 };
 
-#define REGION_SMEM     BIT(INTEL_REGION_SMEM)
-#define REGION_LMEM     BIT(INTEL_REGION_LMEM_0)
-#define REGION_STOLEN_SMEM   BIT(INTEL_REGION_STOLEN_SMEM)
-#define REGION_STOLEN_LMEM   BIT(INTEL_REGION_STOLEN_LMEM)
-
 #define I915_ALLOC_CONTIGUOUS     BIT(0)
 
 #define for_each_memory_region(mr, i915, id) \
@@ -77,7 +72,7 @@ struct intel_memory_region {
 	u16 instance;
 	enum intel_region_id id;
 	char name[16];
-	char uabi_name[16];
+	char uabi_name[20];
 	bool private; /* not for userspace */
 
 	struct {
@@ -89,6 +84,8 @@ struct intel_memory_region {
 
 	void *region_private;
 };
+
+bool intel_memory_type_is_local(enum intel_memory_type mem_type);
 
 struct intel_memory_region *
 intel_memory_region_lookup(struct drm_i915_private *i915,
@@ -112,6 +109,7 @@ void intel_memory_regions_driver_release(struct drm_i915_private *i915);
 struct intel_memory_region *
 intel_memory_region_by_type(struct drm_i915_private *i915,
 			    enum intel_memory_type mem_type);
+const char *intel_memory_type_str(enum intel_memory_type type);
 
 __printf(2, 3) void
 intel_memory_region_set_name(struct intel_memory_region *mem,

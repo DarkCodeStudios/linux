@@ -10,6 +10,7 @@
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
@@ -63,132 +64,19 @@ static int cs35l56_dspwait_put_volsw(struct snd_kcontrol *kcontrol,
 	return snd_soc_put_volsw(kcontrol, ucontrol);
 }
 
-static const unsigned short cs35l56_asp1_mixer_regs[] = {
-	CS35L56_ASP1TX1_INPUT, CS35L56_ASP1TX2_INPUT,
-	CS35L56_ASP1TX3_INPUT, CS35L56_ASP1TX4_INPUT,
-};
-
-static const char * const cs35l56_asp1_mux_control_names[] = {
-	"ASP1 TX1 Source", "ASP1 TX2 Source", "ASP1 TX3 Source", "ASP1 TX4 Source"
-};
-
-static int cs35l56_sync_asp1_mixer_widgets_with_firmware(struct cs35l56_private *cs35l56)
-{
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cs35l56->component);
-	const char *prefix = cs35l56->component->name_prefix;
-	char full_name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
-	const char *name;
-	struct snd_kcontrol *kcontrol;
-	struct soc_enum *e;
-	unsigned int val[4];
-	int i, item, ret;
-
-	if (cs35l56->asp1_mixer_widgets_initialized)
-		return 0;
-
-	/*
-	 * Resume so we can read the registers from silicon if the regmap
-	 * cache has not yet been populated.
-	 */
-	ret = pm_runtime_resume_and_get(cs35l56->base.dev);
-	if (ret < 0)
-		return ret;
-
-	/* Wait for firmware download and reboot */
-	cs35l56_wait_dsp_ready(cs35l56);
-
-	ret = regmap_bulk_read(cs35l56->base.regmap, CS35L56_ASP1TX1_INPUT,
-			       val, ARRAY_SIZE(val));
-
-	pm_runtime_mark_last_busy(cs35l56->base.dev);
-	pm_runtime_put_autosuspend(cs35l56->base.dev);
-
-	if (ret) {
-		dev_err(cs35l56->base.dev, "Failed to read ASP1 mixer regs: %d\n", ret);
-		return ret;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(cs35l56_asp1_mux_control_names); ++i) {
-		name = cs35l56_asp1_mux_control_names[i];
-
-		if (prefix) {
-			snprintf(full_name, sizeof(full_name), "%s %s", prefix, name);
-			name = full_name;
-		}
-
-		kcontrol = snd_soc_card_get_kcontrol_locked(dapm->card, name);
-		if (!kcontrol) {
-			dev_warn(cs35l56->base.dev, "Could not find control %s\n", name);
-			continue;
-		}
-
-		e = (struct soc_enum *)kcontrol->private_value;
-		item = snd_soc_enum_val_to_item(e, val[i] & CS35L56_ASP_TXn_SRC_MASK);
-		snd_soc_dapm_mux_update_power(dapm, kcontrol, item, e, NULL);
-	}
-
-	cs35l56->asp1_mixer_widgets_initialized = true;
-
-	return 0;
-}
-
-static int cs35l56_dspwait_asp1tx_get(struct snd_kcontrol *kcontrol,
-				      struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_soc_dapm_kcontrol_component(kcontrol);
-	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	int index = e->shift_l;
-	unsigned int addr, val;
-	int ret;
-
-	ret = cs35l56_sync_asp1_mixer_widgets_with_firmware(cs35l56);
-	if (ret)
-		return ret;
-
-	addr = cs35l56_asp1_mixer_regs[index];
-	ret = regmap_read(cs35l56->base.regmap, addr, &val);
-	if (ret)
-		return ret;
-
-	val &= CS35L56_ASP_TXn_SRC_MASK;
-	ucontrol->value.enumerated.item[0] = snd_soc_enum_val_to_item(e, val);
-
-	return 0;
-}
-
-static int cs35l56_dspwait_asp1tx_put(struct snd_kcontrol *kcontrol,
-				      struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kcontrol);
-	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	int item = ucontrol->value.enumerated.item[0];
-	int index = e->shift_l;
-	unsigned int addr, val;
-	bool changed;
-	int ret;
-
-	ret = cs35l56_sync_asp1_mixer_widgets_with_firmware(cs35l56);
-	if (ret)
-		return ret;
-
-	addr = cs35l56_asp1_mixer_regs[index];
-	val = snd_soc_enum_item_to_val(e, item);
-
-	ret = regmap_update_bits_check(cs35l56->base.regmap, addr,
-				       CS35L56_ASP_TXn_SRC_MASK, val, &changed);
-	if (ret)
-		return ret;
-
-	if (changed)
-		snd_soc_dapm_mux_update_power(dapm, kcontrol, item, e, NULL);
-
-	return changed;
-}
-
 static DECLARE_TLV_DB_SCALE(vol_tlv, -10000, 25, 0);
+
+static SOC_ENUM_SINGLE_DECL(cs35l56_cal_set_status_enum, SND_SOC_NOPM, 0,
+			    cs35l56_cal_set_status_text);
+
+static int cs35l56_cal_set_status_ctl_get(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+
+	return cs35l56_cal_set_status_get(&cs35l56->base, ucontrol);
+}
 
 static const struct snd_kcontrol_new cs35l56_controls[] = {
 	SOC_SINGLE_EXT("Speaker Switch",
@@ -196,54 +84,79 @@ static const struct snd_kcontrol_new cs35l56_controls[] = {
 		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
 	SOC_SINGLE_S_EXT_TLV("Speaker Volume",
 			     CS35L56_MAIN_RENDER_USER_VOLUME,
-			     6, -400, 400, 9, 0,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SHIFT,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MIN,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MAX,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SIGNBIT,
+			     0,
 			     cs35l56_dspwait_get_volsw,
 			     cs35l56_dspwait_put_volsw,
 			     vol_tlv),
 	SOC_SINGLE_EXT("Posture Number", CS35L56_MAIN_POSTURE_NUMBER,
 		       0, 255, 0,
 		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
+	SOC_ENUM_EXT_ACC("CAL_SET_STATUS", cs35l56_cal_set_status_enum,
+			 cs35l56_cal_set_status_ctl_get, NULL,
+			 SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE),
+};
+
+static const struct snd_kcontrol_new cs35l63_controls[] = {
+	SOC_SINGLE_EXT("Speaker Switch",
+		       CS35L63_MAIN_RENDER_USER_MUTE, 0, 1, 1,
+		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
+	SOC_SINGLE_S_EXT_TLV("Speaker Volume",
+			     CS35L63_MAIN_RENDER_USER_VOLUME,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SHIFT,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MIN,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MAX,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SIGNBIT,
+			     0,
+			     cs35l56_dspwait_get_volsw,
+			     cs35l56_dspwait_put_volsw,
+			     vol_tlv),
+	SOC_SINGLE_EXT("Posture Number", CS35L63_MAIN_POSTURE_NUMBER,
+		       0, 255, 0,
+		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
+	SOC_ENUM_EXT_ACC("CAL_SET_STATUS", cs35l56_cal_set_status_enum,
+			 cs35l56_cal_set_status_ctl_get, NULL,
+			 SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE),
 };
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx1_enum,
-				  SND_SOC_NOPM,
-				  0, 0,
+				  CS35L56_ASP1TX1_INPUT,
+				  0, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx1_mux =
-	SOC_DAPM_ENUM_EXT("ASP1TX1 SRC", cs35l56_asp1tx1_enum,
-			  cs35l56_dspwait_asp1tx_get, cs35l56_dspwait_asp1tx_put);
+	SOC_DAPM_ENUM("ASP1TX1 SRC", cs35l56_asp1tx1_enum);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx2_enum,
-				  SND_SOC_NOPM,
-				  1, 0,
+				  CS35L56_ASP1TX2_INPUT,
+				  0, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx2_mux =
-	SOC_DAPM_ENUM_EXT("ASP1TX2 SRC", cs35l56_asp1tx2_enum,
-			  cs35l56_dspwait_asp1tx_get, cs35l56_dspwait_asp1tx_put);
+	SOC_DAPM_ENUM("ASP1TX2 SRC", cs35l56_asp1tx2_enum);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx3_enum,
-				  SND_SOC_NOPM,
-				  2, 0,
+				  CS35L56_ASP1TX3_INPUT,
+				  0, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx3_mux =
-	SOC_DAPM_ENUM_EXT("ASP1TX3 SRC", cs35l56_asp1tx3_enum,
-			  cs35l56_dspwait_asp1tx_get, cs35l56_dspwait_asp1tx_put);
+	SOC_DAPM_ENUM("ASP1TX3 SRC", cs35l56_asp1tx3_enum);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx4_enum,
-				  SND_SOC_NOPM,
-				  3, 0,
+				  CS35L56_ASP1TX4_INPUT,
+				  0, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx4_mux =
-	SOC_DAPM_ENUM_EXT("ASP1TX4 SRC", cs35l56_asp1tx4_enum,
-			  cs35l56_dspwait_asp1tx_get, cs35l56_dspwait_asp1tx_put);
+	SOC_DAPM_ENUM("ASP1TX4 SRC", cs35l56_asp1tx4_enum);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_sdw1tx1_enum,
 				CS35L56_SWIRE_DP3_CH1_INPUT,
@@ -281,21 +194,6 @@ static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_sdw1tx4_enum,
 static const struct snd_kcontrol_new sdw1_tx4_mux =
 	SOC_DAPM_ENUM("SDW1TX4 SRC", cs35l56_sdw1tx4_enum);
 
-static int cs35l56_asp1_cfg_event(struct snd_soc_dapm_widget *w,
-				  struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
-	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
-
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		/* Override register values set by firmware boot */
-		return cs35l56_force_sync_asp1_registers_from_cache(&cs35l56->base);
-	default:
-		return 0;
-	}
-}
-
 static int cs35l56_play_event(struct snd_soc_dapm_widget *w,
 			      struct snd_kcontrol *kcontrol, int event)
 {
@@ -314,7 +212,7 @@ static int cs35l56_play_event(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_POST_PMU:
 		/* Wait for firmware to enter PS0 power state */
 		ret = regmap_read_poll_timeout(cs35l56->base.regmap,
-					       CS35L56_TRANSDUCER_ACTUAL_PS,
+					       cs35l56->base.fw_reg->transducer_actual_ps,
 					       val, (val == CS35L56_PS0),
 					       CS35L56_PS0_POLL_US,
 					       CS35L56_PS0_TIMEOUT_US);
@@ -331,9 +229,6 @@ static int cs35l56_play_event(struct snd_soc_dapm_widget *w,
 static const struct snd_soc_dapm_widget cs35l56_dapm_widgets[] = {
 	SND_SOC_DAPM_REGULATOR_SUPPLY("VDD_B", 0, 0),
 	SND_SOC_DAPM_REGULATOR_SUPPLY("VDD_AMP", 0, 0),
-
-	SND_SOC_DAPM_SUPPLY("ASP1 CFG", SND_SOC_NOPM, 0, 0, cs35l56_asp1_cfg_event,
-			    SND_SOC_DAPM_PRE_PMU),
 
 	SND_SOC_DAPM_SUPPLY("PLAY", SND_SOC_NOPM, 0, 0, cs35l56_play_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
@@ -374,6 +269,8 @@ static const struct snd_soc_dapm_widget cs35l56_dapm_widgets[] = {
 	SND_SOC_DAPM_SIGGEN("VDDBMON ADC"),
 	SND_SOC_DAPM_SIGGEN("VBSTMON ADC"),
 	SND_SOC_DAPM_SIGGEN("TEMPMON ADC"),
+
+	SND_SOC_DAPM_INPUT("Calibrate"),
 };
 
 #define CS35L56_SRC_ROUTE(name) \
@@ -402,9 +299,6 @@ static const struct snd_soc_dapm_route cs35l56_audio_map[] = {
 	{ "AMP", NULL, "VDD_B" },
 	{ "AMP", NULL, "VDD_AMP" },
 
-	{ "ASP1 Playback", NULL, "ASP1 CFG" },
-	{ "ASP1 Capture", NULL, "ASP1 CFG" },
-
 	{ "ASP1 Playback", NULL, "PLAY" },
 	{ "SDW1 Playback", NULL, "PLAY" },
 
@@ -413,6 +307,7 @@ static const struct snd_soc_dapm_route cs35l56_audio_map[] = {
 	{ "DSP1", NULL, "ASP1RX1" },
 	{ "DSP1", NULL, "ASP1RX2" },
 	{ "DSP1", NULL, "SDW1 Playback" },
+	{ "DSP1", NULL, "Calibrate" },
 	{ "AMP", NULL, "DSP1" },
 	{ "SPK", NULL, "AMP" },
 
@@ -455,13 +350,8 @@ static int cs35l56_asp_dai_set_fmt(struct snd_soc_dai *codec_dai, unsigned int f
 {
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(codec_dai->component);
 	unsigned int val;
-	int ret;
 
 	dev_dbg(cs35l56->base.dev, "%s: %#x\n", __func__, fmt);
-
-	ret = cs35l56_init_asp1_regs_for_driver_control(&cs35l56->base);
-	if (ret)
-		return ret;
 
 	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
 	case SND_SOC_DAIFMT_CBC_CFC:
@@ -536,11 +426,6 @@ static int cs35l56_asp_dai_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx
 					unsigned int rx_mask, int slots, int slot_width)
 {
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(dai->component);
-	int ret;
-
-	ret = cs35l56_init_asp1_regs_for_driver_control(&cs35l56->base);
-	if (ret)
-		return ret;
 
 	if ((slots == 0) || (slot_width == 0)) {
 		dev_dbg(cs35l56->base.dev, "tdm config cleared\n");
@@ -589,11 +474,6 @@ static int cs35l56_asp_dai_hw_params(struct snd_pcm_substream *substream,
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(dai->component);
 	unsigned int rate = params_rate(params);
 	u8 asp_width, asp_wl;
-	int ret;
-
-	ret = cs35l56_init_asp1_regs_for_driver_control(&cs35l56->base);
-	if (ret)
-		return ret;
 
 	asp_wl = params_width(params);
 	if (cs35l56->asp_slot_width)
@@ -650,11 +530,7 @@ static int cs35l56_asp_dai_set_sysclk(struct snd_soc_dai *dai,
 				      int clk_id, unsigned int freq, int dir)
 {
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(dai->component);
-	int freq_id, ret;
-
-	ret = cs35l56_init_asp1_regs_for_driver_control(&cs35l56->base);
-	if (ret)
-		return ret;
+	int freq_id;
 
 	if (freq == 0) {
 		cs35l56->sysclk_set = false;
@@ -811,6 +687,12 @@ static struct snd_soc_dai_driver cs35l56_dai[] = {
 			.rates = CS35L56_RATES,
 			.formats = CS35L56_RX_FORMATS,
 		},
+		.symmetric_rate = 1,
+		.ops = &cs35l56_sdw_dai_ops,
+	},
+	{
+		.name = "cs35l56-sdw1c",
+		.id = 2,
 		.capture = {
 			.stream_name = "SDW1 Capture",
 			.channels_min = 1,
@@ -820,7 +702,7 @@ static struct snd_soc_dai_driver cs35l56_dai[] = {
 		},
 		.symmetric_rate = 1,
 		.ops = &cs35l56_sdw_dai_ops,
-	}
+	},
 };
 
 static int cs35l56_write_cal(struct cs35l56_private *cs35l56)
@@ -835,7 +717,7 @@ static int cs35l56_write_cal(struct cs35l56_private *cs35l56)
 		return ret;
 
 	ret = cs_amp_write_cal_coeffs(&cs35l56->dsp.cs_dsp,
-				      &cs35l56_calibration_controls,
+				      cs35l56->base.calibration_controls,
 				      &cs35l56->base.cal_data);
 
 	wm_adsp_stop(&cs35l56->dsp);
@@ -846,16 +728,40 @@ static int cs35l56_write_cal(struct cs35l56_private *cs35l56)
 	return ret;
 }
 
+static int cs35l56_dsp_download_and_power_up(struct cs35l56_private *cs35l56,
+					     bool load_firmware)
+{
+	int ret;
+
+	/*
+	 * Abort the first load if it didn't find the suffixed bins and
+	 * we have an alternate fallback suffix.
+	 */
+	cs35l56->dsp.bin_mandatory = (load_firmware && cs35l56->fallback_fw_suffix);
+
+	ret = wm_adsp_power_up(&cs35l56->dsp, load_firmware);
+	if ((ret == -ENOENT) && cs35l56->dsp.bin_mandatory) {
+		cs35l56->dsp.fwf_suffix = cs35l56->fallback_fw_suffix;
+		cs35l56->fallback_fw_suffix = NULL;
+		cs35l56->dsp.bin_mandatory = false;
+		ret = wm_adsp_power_up(&cs35l56->dsp, load_firmware);
+	}
+
+	if (ret) {
+		dev_dbg(cs35l56->base.dev, "wm_adsp_power_up ret %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 static void cs35l56_reinit_patch(struct cs35l56_private *cs35l56)
 {
 	int ret;
 
-	/* Use wm_adsp to load and apply the firmware patch and coefficient files */
-	ret = wm_adsp_power_up(&cs35l56->dsp, true);
-	if (ret) {
-		dev_dbg(cs35l56->base.dev, "%s: wm_adsp_power_up ret %d\n", __func__, ret);
+	ret = cs35l56_dsp_download_and_power_up(cs35l56, true);
+	if (ret)
 		return;
-	}
 
 	cs35l56_write_cal(cs35l56);
 
@@ -890,11 +796,9 @@ static void cs35l56_patch(struct cs35l56_private *cs35l56, bool firmware_missing
 	 * but only if firmware is missing. If firmware is already patched just
 	 * power-up wm_adsp without downloading firmware.
 	 */
-	ret = wm_adsp_power_up(&cs35l56->dsp, !!firmware_missing);
-	if (ret) {
-		dev_dbg(cs35l56->base.dev, "%s: wm_adsp_power_up ret %d\n", __func__, ret);
+	ret = cs35l56_dsp_download_and_power_up(cs35l56, firmware_missing);
+	if (ret)
 		goto err;
-	}
 
 	mutex_lock(&cs35l56->base.irq_lock);
 
@@ -919,7 +823,11 @@ static void cs35l56_patch(struct cs35l56_private *cs35l56, bool firmware_missing
 		goto err_unlock;
 	}
 
-	regmap_clear_bits(cs35l56->base.regmap, CS35L56_PROTECTION_STATUS,
+	/* Check if the firmware is still reported missing */
+	cs35l56_warn_if_firmware_missing(&cs35l56->base);
+
+	regmap_clear_bits(cs35l56->base.regmap,
+			  cs35l56->base.fw_reg->prot_sts,
 			  CS35L56_FIRMWARE_MISSING);
 	cs35l56->base.fw_patched = true;
 
@@ -986,16 +894,254 @@ static void cs35l56_dsp_work(struct work_struct *work)
 	else
 		cs35l56_patch(cs35l56, firmware_missing);
 
+	cs35l56_log_tuning(&cs35l56->base, &cs35l56->dsp.cs_dsp);
 err:
-	pm_runtime_mark_last_busy(cs35l56->base.dev);
 	pm_runtime_put_autosuspend(cs35l56->base.dev);
+}
+
+static struct snd_soc_dapm_context *cs35l56_power_up_for_cal(struct cs35l56_private *cs35l56)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cs35l56->component);
+	int ret;
+
+	ret = snd_soc_dapm_enable_pin(dapm, "Calibrate");
+	if (ret)
+		return ERR_PTR(ret);
+
+	snd_soc_dapm_sync(dapm);
+
+	return dapm;
+}
+
+static void cs35l56_power_down_after_cal(struct cs35l56_private *cs35l56)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cs35l56->component);
+
+	snd_soc_dapm_disable_pin(dapm, "Calibrate");
+	snd_soc_dapm_sync(dapm);
+}
+
+static ssize_t cs35l56_debugfs_calibrate_write(struct file *file,
+					       const char __user *from,
+					       size_t count, loff_t *ppos)
+{
+	struct cs35l56_base *cs35l56_base = file->private_data;
+	struct cs35l56_private *cs35l56 = cs35l56_private_from_base(cs35l56_base);
+	struct snd_soc_dapm_context *dapm;
+	ssize_t ret;
+
+	dapm = cs35l56_power_up_for_cal(cs35l56);
+	if (IS_ERR(dapm))
+		return PTR_ERR(dapm);
+
+	snd_soc_dapm_mutex_lock(dapm);
+	ret = cs35l56_calibrate_debugfs_write(&cs35l56->base, from, count, ppos);
+	snd_soc_dapm_mutex_unlock(dapm);
+
+	cs35l56_power_down_after_cal(cs35l56);
+
+	return ret;
+}
+
+static ssize_t cs35l56_debugfs_cal_temperature_write(struct file *file,
+						     const char __user *from,
+						     size_t count, loff_t *ppos)
+{
+	struct cs35l56_base *cs35l56_base = file->private_data;
+	struct cs35l56_private *cs35l56 = cs35l56_private_from_base(cs35l56_base);
+	struct snd_soc_dapm_context *dapm;
+	ssize_t ret;
+
+	dapm = cs35l56_power_up_for_cal(cs35l56);
+	if (IS_ERR(dapm))
+		return PTR_ERR(dapm);
+
+	ret = cs35l56_cal_ambient_debugfs_write(&cs35l56->base, from, count, ppos);
+	cs35l56_power_down_after_cal(cs35l56);
+
+	return ret;
+}
+
+static ssize_t cs35l56_debugfs_cal_data_read(struct file *file,
+					     char __user *to,
+					     size_t count, loff_t *ppos)
+{
+	struct cs35l56_base *cs35l56_base = file->private_data;
+	struct cs35l56_private *cs35l56 = cs35l56_private_from_base(cs35l56_base);
+	struct snd_soc_dapm_context *dapm;
+	ssize_t ret;
+
+	dapm = cs35l56_power_up_for_cal(cs35l56);
+	if (IS_ERR(dapm))
+		return PTR_ERR(dapm);
+
+	ret = cs35l56_cal_data_debugfs_read(&cs35l56->base, to, count, ppos);
+	cs35l56_power_down_after_cal(cs35l56);
+
+	return ret;
+}
+
+static int cs35l56_new_cal_data_apply(struct cs35l56_private *cs35l56)
+{
+	struct snd_soc_dapm_context *dapm;
+	int ret;
+
+	if (!cs35l56->base.cal_data_valid)
+		return -ENXIO;
+
+	if (cs35l56->base.secured)
+		return -EACCES;
+
+	dapm = cs35l56_power_up_for_cal(cs35l56);
+	if (IS_ERR(dapm))
+		return PTR_ERR(dapm);
+
+	snd_soc_dapm_mutex_lock(dapm);
+	ret = cs_amp_write_cal_coeffs(&cs35l56->dsp.cs_dsp,
+				      cs35l56->base.calibration_controls,
+				      &cs35l56->base.cal_data);
+	if (ret == 0)
+		cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_AUDIO_REINIT);
+	else
+		ret = -EIO;
+
+	snd_soc_dapm_mutex_unlock(dapm);
+	cs35l56_power_down_after_cal(cs35l56);
+
+	return ret;
+}
+
+static ssize_t cs35l56_debugfs_cal_data_write(struct file *file,
+					      const char __user *from,
+					      size_t count, loff_t *ppos)
+{
+	struct cs35l56_base *cs35l56_base = file->private_data;
+	struct cs35l56_private *cs35l56 = cs35l56_private_from_base(cs35l56_base);
+	int ret;
+
+	ret = cs35l56_cal_data_debugfs_write(&cs35l56->base, from, count, ppos);
+	if (ret == -ENODATA)
+		return count;	/* Ignore writes of empty cal blobs */
+	else if (ret < 0)
+		return -EIO;
+
+	ret = cs35l56_new_cal_data_apply(cs35l56);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static const struct cs35l56_cal_debugfs_fops cs35l56_cal_debugfs_fops = {
+	.calibrate = {
+		.write = cs35l56_debugfs_calibrate_write,
+	},
+	.cal_temperature = {
+		.write = cs35l56_debugfs_cal_temperature_write,
+	},
+	.cal_data = {
+		.read = cs35l56_debugfs_cal_data_read,
+		.write = cs35l56_debugfs_cal_data_write,
+	},
+};
+
+static int cs35l56_cal_data_rb_ctl_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+
+	if (!cs35l56->base.cal_data_valid)
+		return -ENODATA;
+
+	memcpy(ucontrol->value.bytes.data, &cs35l56->base.cal_data,
+	       sizeof(cs35l56->base.cal_data));
+
+	return 0;
+}
+
+static int cs35l56_cal_data_ctl_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+
+	/*
+	 * This control is write-only but mixer libraries often try to read
+	 * a control before writing it. So we have to implement read.
+	 * Return zeros so a write of valid data will always be a change
+	 * from its "current value".
+	 */
+	memset(ucontrol->value.bytes.data, 0, sizeof(cs35l56->base.cal_data));
+
+	return 0;
+}
+
+static int cs35l56_cal_data_ctl_set(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+	const struct cirrus_amp_cal_data *cal_data = (const void *)ucontrol->value.bytes.data;
+	int ret;
+
+	if (cs35l56->base.cal_data_valid)
+		return -EACCES;
+
+	ret = cs35l56_stash_calibration(&cs35l56->base, cal_data);
+	if (ret)
+		return ret;
+
+	ret = cs35l56_new_cal_data_apply(cs35l56);
+	if (ret < 0)
+		return ret;
+
+	return 1;
+}
+
+static const struct snd_kcontrol_new cs35l56_cal_data_restore_controls[] = {
+	SND_SOC_BYTES_E("CAL_DATA", 0, sizeof(struct cirrus_amp_cal_data) / sizeof(u32),
+			cs35l56_cal_data_ctl_get, cs35l56_cal_data_ctl_set),
+	SND_SOC_BYTES_E_ACC("CAL_DATA_RB", 0, sizeof(struct cirrus_amp_cal_data) / sizeof(u32),
+			cs35l56_cal_data_rb_ctl_get, NULL,
+			SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE),
+};
+
+static int cs35l56_set_fw_suffix(struct cs35l56_private *cs35l56)
+{
+	if (cs35l56->dsp.fwf_suffix)
+		return 0;
+
+	if (!cs35l56->sdw_peripheral)
+		return 0;
+
+	cs35l56->dsp.fwf_suffix = devm_kasprintf(cs35l56->base.dev, GFP_KERNEL,
+						 "l%uu%u",
+						 cs35l56->sdw_link_num,
+						 cs35l56->sdw_unique_id);
+	if (!cs35l56->dsp.fwf_suffix)
+		return -ENOMEM;
+
+	/*
+	 * There are published firmware files for L56 B0 silicon using
+	 * the ALSA prefix as the filename suffix. Default to trying these
+	 * first, with the new name as an alternate.
+	 */
+	if ((cs35l56->base.type == 0x56) && (cs35l56->base.rev == 0xb0)) {
+		cs35l56->fallback_fw_suffix = cs35l56->dsp.fwf_suffix;
+		cs35l56->dsp.fwf_suffix = cs35l56->component->name_prefix;
+	}
+
+	return 0;
 }
 
 static int cs35l56_component_probe(struct snd_soc_component *component)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
 	struct dentry *debugfs_root = component->debugfs_root;
 	unsigned short vendor, device;
+	int ret;
 
 	BUILD_BUG_ON(ARRAY_SIZE(cs35l56_tx_input_texts) != ARRAY_SIZE(cs35l56_tx_input_values));
 
@@ -1029,18 +1175,48 @@ static int cs35l56_component_probe(struct snd_soc_component *component)
 		return -ENOMEM;
 
 	cs35l56->component = component;
+	ret = cs35l56_set_fw_suffix(cs35l56);
+	if (ret)
+		return ret;
+
 	wm_adsp2_component_probe(&cs35l56->dsp, component);
 
 	debugfs_create_bool("init_done", 0444, debugfs_root, &cs35l56->base.init_done);
 	debugfs_create_bool("can_hibernate", 0444, debugfs_root, &cs35l56->base.can_hibernate);
 	debugfs_create_bool("fw_patched", 0444, debugfs_root, &cs35l56->base.fw_patched);
 
-	/*
-	 * The widgets for the ASP1TX mixer can't be initialized
-	 * until the firmware has been downloaded and rebooted.
-	 */
-	regcache_drop_region(cs35l56->base.regmap, CS35L56_ASP1TX1_INPUT, CS35L56_ASP1TX4_INPUT);
-	cs35l56->asp1_mixer_widgets_initialized = false;
+
+	switch (cs35l56->base.type) {
+	case 0x54:
+	case 0x56:
+	case 0x57:
+		ret = snd_soc_add_component_controls(component, cs35l56_controls,
+						     ARRAY_SIZE(cs35l56_controls));
+		break;
+	case 0x63:
+		ret = snd_soc_add_component_controls(component, cs35l63_controls,
+						     ARRAY_SIZE(cs35l63_controls));
+		break;
+	default:
+		ret = -ENODEV;
+		break;
+	}
+
+	if (!ret && IS_ENABLED(CONFIG_SND_SOC_CS35L56_CAL_SET_CTRL)) {
+		ret = snd_soc_add_component_controls(component,
+						     cs35l56_cal_data_restore_controls,
+						     ARRAY_SIZE(cs35l56_cal_data_restore_controls));
+	}
+
+	if (ret)
+		return dev_err_probe(cs35l56->base.dev, ret, "unable to add controls\n");
+
+	ret = snd_soc_dapm_disable_pin(dapm, "Calibrate");
+	if (ret)
+		return ret;
+
+	if (IS_ENABLED(CONFIG_SND_SOC_CS35L56_CAL_DEBUGFS))
+		cs35l56_create_cal_debugfs(&cs35l56->base, &cs35l56_cal_debugfs_fops);
 
 	queue_work(cs35l56->dsp_wq, &cs35l56->dsp_work);
 
@@ -1052,6 +1228,8 @@ static void cs35l56_component_remove(struct snd_soc_component *component)
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
 
 	cancel_work_sync(&cs35l56->dsp_work);
+
+	cs35l56_remove_cal_debugfs(&cs35l56->base);
 
 	if (cs35l56->dsp.cs_dsp.booted)
 		wm_adsp_power_down(&cs35l56->dsp);
@@ -1071,6 +1249,7 @@ static int cs35l56_set_bias_level(struct snd_soc_component *component,
 				  enum snd_soc_bias_level level)
 {
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_STANDBY:
@@ -1078,7 +1257,7 @@ static int cs35l56_set_bias_level(struct snd_soc_component *component,
 		 * Wait for patching to complete when transitioning from
 		 * BIAS_OFF to BIAS_STANDBY
 		 */
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF)
 			cs35l56_wait_dsp_ready(cs35l56);
 
 		break;
@@ -1097,8 +1276,6 @@ static const struct snd_soc_component_driver soc_component_dev_cs35l56 = {
 	.num_dapm_widgets = ARRAY_SIZE(cs35l56_dapm_widgets),
 	.dapm_routes = cs35l56_audio_map,
 	.num_dapm_routes = ARRAY_SIZE(cs35l56_audio_map),
-	.controls = cs35l56_controls,
-	.num_controls = ARRAY_SIZE(cs35l56_controls),
 
 	.set_bias_level = cs35l56_set_bias_level,
 
@@ -1267,6 +1444,11 @@ int cs35l56_system_resume(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(cs35l56_system_resume);
 
+static int cs35l56_control_add_nop(struct wm_adsp *dsp, struct cs_dsp_coeff_ctl *cs_ctl)
+{
+	return 0;
+}
+
 static int cs35l56_dsp_init(struct cs35l56_private *cs35l56)
 {
 	struct wm_adsp *dsp;
@@ -1288,6 +1470,12 @@ static int cs35l56_dsp_init(struct cs35l56_private *cs35l56)
 	 */
 	dsp->fw = 12;
 	dsp->wmfw_optional = true;
+
+	/*
+	 * None of the firmware controls need to be exported so add a no-op
+	 * callback that suppresses creating an ALSA control.
+	 */
+	dsp->control_add = &cs35l56_control_add_nop;
 
 	dev_dbg(cs35l56->base.dev, "DSP system name: '%s'\n", dsp->system_name);
 
@@ -1432,9 +1620,6 @@ int cs35l56_common_probe(struct cs35l56_private *cs35l56)
 	cs35l56->base.cal_index = -1;
 	cs35l56->speaker_id = -ENOENT;
 
-	/* Assume that the firmware owns ASP1 until we know different */
-	cs35l56->base.fw_owns_asp1 = true;
-
 	dev_set_drvdata(cs35l56->base.dev, cs35l56);
 
 	cs35l56_fill_supply_names(cs35l56->supplies);
@@ -1505,7 +1690,7 @@ err:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_common_probe, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_common_probe, "SND_SOC_CS35L56_CORE");
 
 int cs35l56_init(struct cs35l56_private *cs35l56)
 {
@@ -1586,7 +1771,7 @@ post_soft_reset:
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_init, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_init, "SND_SOC_CS35L56_CORE");
 
 void cs35l56_remove(struct cs35l56_private *cs35l56)
 {
@@ -1599,7 +1784,6 @@ void cs35l56_remove(struct cs35l56_private *cs35l56)
 	if (cs35l56->base.irq)
 		devm_free_irq(cs35l56->base.dev, cs35l56->base.irq, &cs35l56->base);
 
-	flush_workqueue(cs35l56->dsp_wq);
 	destroy_workqueue(cs35l56->dsp_wq);
 
 	pm_runtime_dont_use_autosuspend(cs35l56->base.dev);
@@ -1611,7 +1795,7 @@ void cs35l56_remove(struct cs35l56_private *cs35l56)
 	gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 0);
 	regulator_bulk_disable(ARRAY_SIZE(cs35l56->supplies), cs35l56->supplies);
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_remove, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_remove, "SND_SOC_CS35L56_CORE");
 
 #if IS_ENABLED(CONFIG_SND_SOC_CS35L56_I2C) || IS_ENABLED(CONFIG_SND_SOC_CS35L56_SPI)
 EXPORT_NS_GPL_DEV_PM_OPS(cs35l56_pm_ops_i2c_spi, SND_SOC_CS35L56_CORE) = {
@@ -1623,8 +1807,8 @@ EXPORT_NS_GPL_DEV_PM_OPS(cs35l56_pm_ops_i2c_spi, SND_SOC_CS35L56_CORE) = {
 #endif
 
 MODULE_DESCRIPTION("ASoC CS35L56 driver");
-MODULE_IMPORT_NS(SND_SOC_CS35L56_SHARED);
-MODULE_IMPORT_NS(SND_SOC_CS_AMP_LIB);
+MODULE_IMPORT_NS("SND_SOC_CS35L56_SHARED");
+MODULE_IMPORT_NS("SND_SOC_CS_AMP_LIB");
 MODULE_AUTHOR("Richard Fitzgerald <rf@opensource.cirrus.com>");
 MODULE_AUTHOR("Simon Trimmer <simont@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");

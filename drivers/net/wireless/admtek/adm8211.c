@@ -1293,7 +1293,7 @@ static void adm8211_set_bssid(struct ieee80211_hw *dev, const u8 *bssid)
 	ADM8211_CSR_WRITE(ABDA1, reg);
 }
 
-static int adm8211_config(struct ieee80211_hw *dev, u32 changed)
+static int adm8211_config(struct ieee80211_hw *dev, int radio_idx, u32 changed)
 {
 	struct adm8211_priv *priv = dev->priv;
 	struct ieee80211_conf *conf = &dev->conf;
@@ -1550,7 +1550,7 @@ fail:
 	return retval;
 }
 
-static void adm8211_stop(struct ieee80211_hw *dev)
+static void adm8211_stop(struct ieee80211_hw *dev, bool suspend)
 {
 	struct adm8211_priv *priv = dev->priv;
 

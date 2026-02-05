@@ -155,12 +155,9 @@ xchk_quota_item(
 	 * We want to validate the bmap record for the storage backing this
 	 * dquot, so we need to lock the dquot and the quota file.  For quota
 	 * operations, the locking order is first the ILOCK and then the dquot.
-	 * However, dqiterate gave us a locked dquot, so drop the dquot lock to
-	 * get the ILOCK.
 	 */
-	xfs_dqunlock(dq);
 	xchk_ilock(sc, XFS_ILOCK_SHARED);
-	xfs_dqlock(dq);
+	mutex_lock(&dq->q_qlock);
 
 	/*
 	 * Except for the root dquot, the actual dquot we got must either have
@@ -212,12 +209,18 @@ xchk_quota_item(
 		if (mp->m_sb.sb_dblocks < dq->q_blk.count)
 			xchk_fblock_set_warning(sc, XFS_DATA_FORK,
 					offset);
+		if (mp->m_sb.sb_rblocks < dq->q_rtb.count)
+			xchk_fblock_set_warning(sc, XFS_DATA_FORK,
+					offset);
 	} else {
 		if (mp->m_sb.sb_dblocks < dq->q_blk.count)
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK,
 					offset);
+		if (mp->m_sb.sb_rblocks < dq->q_rtb.count)
+			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK,
+					offset);
 	}
-	if (dq->q_ino.count > fs_icount || dq->q_rtb.count > mp->m_sb.sb_rblocks)
+	if (dq->q_ino.count > fs_icount)
 		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, offset);
 
 	/*
@@ -245,6 +248,7 @@ xchk_quota_item(
 	xchk_quota_item_timer(sc, offset, &dq->q_rtb);
 
 out:
+	mutex_unlock(&dq->q_qlock);
 	if (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT)
 		return -ECANCELED;
 
@@ -324,7 +328,7 @@ xchk_quota(
 	xchk_dqiter_init(&cursor, sc, dqtype);
 	while ((error = xchk_dquot_iter(&cursor, &dq)) == 1) {
 		error = xchk_quota_item(&sqi, dq);
-		xfs_qm_dqput(dq);
+		xfs_qm_dqrele(dq);
 		if (error)
 			break;
 	}

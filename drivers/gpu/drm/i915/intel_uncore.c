@@ -21,20 +21,31 @@
  * IN THE SOFTWARE.
  */
 
-#include <drm/drm_managed.h>
 #include <linux/pm_runtime.h>
 
+#include <drm/drm_managed.h>
+#include <drm/drm_print.h>
+
+#include "display/intel_display_core.h"
 #include "gt/intel_engine_regs.h"
+#include "gt/intel_gt.h"
 #include "gt/intel_gt_regs.h"
 
 #include "i915_drv.h"
 #include "i915_iosf_mbi.h"
 #include "i915_reg.h"
-#include "i915_trace.h"
 #include "i915_vgpu.h"
+#include "i915_wait_util.h"
+#include "i915_mmio_range.h"
+#include "intel_uncore_trace.h"
 
 #define FORCEWAKE_ACK_TIMEOUT_MS 50
 #define GT_FIFO_TIMEOUT_MS	 10
+
+struct intel_uncore *to_intel_uncore(struct drm_device *drm)
+{
+	return &to_i915(drm)->uncore;
+}
 
 #define __raw_posting_read(...) ((void)__raw_uncore_read32(__VA_ARGS__))
 
@@ -180,14 +191,16 @@ fw_domain_wait_ack_clear(const struct intel_uncore_forcewake_domain *d)
 	if (!wait_ack_clear(d, FORCEWAKE_KERNEL))
 		return;
 
-	if (fw_ack(d) == ~0)
+	if (fw_ack(d) == ~0) {
 		drm_err(&d->uncore->i915->drm,
 			"%s: MMIO unreliable (forcewake register returns 0xFFFFFFFF)!\n",
 			intel_uncore_forcewake_domain_to_str(d->id));
-	else
+		intel_gt_set_wedged_async(d->uncore->gt);
+	} else {
 		drm_err(&d->uncore->i915->drm,
 			"%s: timed out waiting for forcewake ack to clear.\n",
 			intel_uncore_forcewake_domain_to_str(d->id));
+	}
 
 	add_taint_for_CI(d->uncore->i915, TAINT_WARN); /* CI now unreliable */
 }
@@ -988,7 +1001,7 @@ find_fw_domain(struct intel_uncore *uncore, u32 offset)
  * scanned for obvious mistakes or typos by the selftests.
  */
 
-static const struct i915_range gen8_shadowed_regs[] = {
+static const struct i915_mmio_range gen8_shadowed_regs[] = {
 	{ .start =  0x2030, .end =  0x2030 },
 	{ .start =  0xA008, .end =  0xA00C },
 	{ .start = 0x12030, .end = 0x12030 },
@@ -996,7 +1009,7 @@ static const struct i915_range gen8_shadowed_regs[] = {
 	{ .start = 0x22030, .end = 0x22030 },
 };
 
-static const struct i915_range gen11_shadowed_regs[] = {
+static const struct i915_mmio_range gen11_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2550, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1023,7 +1036,7 @@ static const struct i915_range gen11_shadowed_regs[] = {
 	{ .start = 0x1D8510, .end = 0x1D8550 },
 };
 
-static const struct i915_range gen12_shadowed_regs[] = {
+static const struct i915_mmio_range gen12_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1067,7 +1080,7 @@ static const struct i915_range gen12_shadowed_regs[] = {
 	{ .start = 0x1F8510, .end = 0x1F8550 },
 };
 
-static const struct i915_range dg2_shadowed_regs[] = {
+static const struct i915_mmio_range dg2_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1106,7 +1119,7 @@ static const struct i915_range dg2_shadowed_regs[] = {
 	{ .start = 0x1F8510, .end = 0x1F8550 },
 };
 
-static const struct i915_range mtl_shadowed_regs[] = {
+static const struct i915_mmio_range mtl_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1124,7 +1137,7 @@ static const struct i915_range mtl_shadowed_regs[] = {
 	{ .start =  0x22510, .end =  0x22550 },
 };
 
-static const struct i915_range xelpmp_shadowed_regs[] = {
+static const struct i915_mmio_range xelpmp_shadowed_regs[] = {
 	{ .start = 0x1C0030, .end = 0x1C0030 },
 	{ .start = 0x1C0510, .end = 0x1C0550 },
 	{ .start = 0x1C8030, .end = 0x1C8030 },
@@ -1145,7 +1158,7 @@ static const struct i915_range xelpmp_shadowed_regs[] = {
 	{ .start = 0x38CFD4, .end = 0x38CFDC },
 };
 
-static int mmio_range_cmp(u32 key, const struct i915_range *range)
+static int mmio_range_cmp(u32 key, const struct i915_mmio_range *range)
 {
 	if (key < range->start)
 		return -1;
@@ -2095,8 +2108,7 @@ static int __fw_domain_init(struct intel_uncore *uncore,
 
 	d->mask = BIT(domain_id);
 
-	hrtimer_init(&d->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	d->timer.function = intel_uncore_fw_release_timer;
+	hrtimer_setup(&d->timer, intel_uncore_fw_release_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	uncore->fw_domains |= BIT(domain_id);
 
@@ -2469,7 +2481,7 @@ static int sanity_check_mmio_access(struct intel_uncore *uncore)
 
 	/*
 	 * Sanitycheck that MMIO access to the device is working properly.  If
-	 * the CPU is unable to communcate with a PCI device, BAR reads will
+	 * the CPU is unable to communicate with a PCI device, BAR reads will
 	 * return 0xFFFFFFFF.  Let's make sure the device isn't in this state
 	 * before we start trying to access registers.
 	 *
@@ -2493,6 +2505,7 @@ static int sanity_check_mmio_access(struct intel_uncore *uncore)
 int intel_uncore_init_mmio(struct intel_uncore *uncore)
 {
 	struct drm_i915_private *i915 = uncore->i915;
+	struct intel_display *display = i915->display;
 	int ret;
 
 	ret = sanity_check_mmio_access(uncore);
@@ -2527,7 +2540,7 @@ int intel_uncore_init_mmio(struct intel_uncore *uncore)
 	GEM_BUG_ON(intel_uncore_has_forcewake(uncore) != !!uncore->funcs.read_fw_domains);
 	GEM_BUG_ON(intel_uncore_has_forcewake(uncore) != !!uncore->funcs.write_fw_domains);
 
-	if (HAS_FPGA_DBG_UNCLAIMED(i915))
+	if (HAS_FPGA_DBG_UNCLAIMED(display))
 		uncore->flags |= UNCORE_HAS_FPGA_DBG_UNCLAIMED;
 
 	if (IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915))
@@ -2614,10 +2627,17 @@ void intel_uncore_prune_engine_fw_domains(struct intel_uncore *uncore,
 static void driver_initiated_flr(struct intel_uncore *uncore)
 {
 	struct drm_i915_private *i915 = uncore->i915;
-	const unsigned int flr_timeout_ms = 3000; /* specs recommend a 3s wait */
+	unsigned int flr_timeout_ms;
 	int ret;
 
 	drm_dbg(&i915->drm, "Triggering Driver-FLR\n");
+
+	/*
+	 * The specification recommends a 3 seconds FLR reset timeout. To be
+	 * cautious, we will extend this to 9 seconds, three times the specified
+	 * timeout.
+	 */
+	flr_timeout_ms = 9000;
 
 	/*
 	 * Make sure any pending FLR requests have cleared by waiting for the
@@ -2628,7 +2648,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	 * is still pending (unless the HW is totally dead), but better to be
 	 * safe in case something unexpected happens
 	 */
-	ret = intel_wait_for_register_fw(uncore, GU_CNTL, DRIVERFLR, 0, flr_timeout_ms);
+	ret = intel_wait_for_register_fw(uncore, GU_CNTL, DRIVERFLR, 0, flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm,
 			"Failed to wait for Driver-FLR bit to clear! %d\n",
@@ -2643,7 +2663,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	/* Wait for hardware teardown to complete */
 	ret = intel_wait_for_register_fw(uncore, GU_CNTL,
 					 DRIVERFLR, 0,
-					 flr_timeout_ms);
+					 flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm, "Driver-FLR-teardown wait completion failed! %d\n", ret);
 		return;
@@ -2652,7 +2672,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	/* Wait for hardware/firmware re-init to complete */
 	ret = intel_wait_for_register_fw(uncore, GU_DEBUG,
 					 DRIVERFLR_STATUS, DRIVERFLR_STATUS,
-					 flr_timeout_ms);
+					 flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm, "Driver-FLR-reinit wait completion failed! %d\n", ret);
 		return;

@@ -64,7 +64,8 @@ struct drm_gem_object *nouveau_gem_prime_import_sg_table(struct drm_device *dev,
 	 * to the caller, instead of a normal nouveau_bo ttm reference. */
 	ret = drm_gem_object_init(dev, &nvbo->bo.base, size);
 	if (ret) {
-		nouveau_bo_ref(NULL, &nvbo);
+		drm_gem_object_release(&nvbo->bo.base);
+		kfree(nvbo);
 		obj = ERR_PTR(-ENOMEM);
 		goto unlock;
 	}
@@ -107,9 +108,21 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 					 int flags)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(gobj);
+	struct ttm_operation_ctx ctx = {
+		.interruptible = true,
+		.no_wait_gpu = true,
+		/* We opt to avoid OOM on system pages allocations */
+		.gfp_retry_mayfail = true,
+		.allow_res_evict = false,
+	};
+	int ret;
 
 	if (nvbo->no_share)
 		return ERR_PTR(-EPERM);
+
+	ret = ttm_bo_setup_export(&nvbo->bo, &ctx);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return drm_gem_prime_export(gobj, flags);
 }

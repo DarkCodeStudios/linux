@@ -495,16 +495,6 @@ struct hifn_crypt_command {
 #define	HIFN_CRYPT_CMD_SRCLEN_M		0xc000
 #define	HIFN_CRYPT_CMD_SRCLEN_S		14
 
-/*
- * Structure to help build up the command data structure.
- */
-struct hifn_mac_command {
-	volatile __le16	masks;
-	volatile __le16	header_skip;
-	volatile __le16	source_count;
-	volatile __le16	reserved;
-};
-
 #define	HIFN_MAC_CMD_ALG_MASK		0x0001
 #define	HIFN_MAC_CMD_ALG_SHA1		0x0000
 #define	HIFN_MAC_CMD_ALG_MD5		0x0001
@@ -525,13 +515,6 @@ struct hifn_mac_command {
  */
 #define	HIFN_MAC_CMD_POS_IPSEC		0x0200
 #define	HIFN_MAC_CMD_NEW_KEY		0x0800
-
-struct hifn_comp_command {
-	volatile __le16		masks;
-	volatile __le16		header_skip;
-	volatile __le16		source_count;
-	volatile __le16		reserved;
-};
 
 #define	HIFN_COMP_CMD_SRCLEN_M		0xc000
 #define	HIFN_COMP_CMD_SRCLEN_S		14
@@ -930,11 +913,10 @@ static void hifn_init_pll(struct hifn_device *dev)
 	else
 		pllcfg |= HIFN_PLL_REF_CLK_HBI;
 
-	if (hifn_pll_ref[3] != '\0')
-		freq = simple_strtoul(hifn_pll_ref + 3, NULL, 10);
-	else {
+	if (hifn_pll_ref[3] == '\0' ||
+	    kstrtouint(hifn_pll_ref + 3, 10, &freq)) {
 		freq = 66;
-		dev_info(&dev->pdev->dev, "assuming %uMHz clock speed, override with hifn_pll_ref=%.3s<frequency>\n",
+		dev_info(&dev->pdev->dev, "assuming %u MHz clock speed, override with hifn_pll_ref=%.3s<frequency>\n",
 			 freq, hifn_pll_ref);
 	}
 

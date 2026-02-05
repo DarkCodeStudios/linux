@@ -40,7 +40,8 @@ int hashtab_init(struct hashtab *h, u32 nel_hint)
 	h->htable = NULL;
 
 	if (size) {
-		h->htable = kcalloc(size, sizeof(*h->htable), GFP_KERNEL);
+		h->htable = kcalloc(size, sizeof(*h->htable),
+				    GFP_KERNEL | __GFP_NOWARN);
 		if (!h->htable)
 			return -ENOMEM;
 		h->size = size;
@@ -194,7 +195,5 @@ error:
 
 void __init hashtab_cache_init(void)
 {
-	hashtab_node_cachep = kmem_cache_create("hashtab_node",
-						sizeof(struct hashtab_node), 0,
-						SLAB_PANIC, NULL);
+	hashtab_node_cachep = KMEM_CACHE(hashtab_node, SLAB_PANIC);
 }

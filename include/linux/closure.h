@@ -159,6 +159,7 @@ struct closure {
 #ifdef CONFIG_DEBUG_CLOSURES
 #define CLOSURE_MAGIC_DEAD	0xc054dead
 #define CLOSURE_MAGIC_ALIVE	0xc054a11e
+#define CLOSURE_MAGIC_STACK	0xc05451cc
 
 	unsigned int		magic;
 	struct list_head	all;
@@ -323,12 +324,18 @@ static inline void closure_init_stack(struct closure *cl)
 {
 	memset(cl, 0, sizeof(struct closure));
 	atomic_set(&cl->remaining, CLOSURE_REMAINING_INITIALIZER);
+#ifdef CONFIG_DEBUG_CLOSURES
+	cl->magic = CLOSURE_MAGIC_STACK;
+#endif
 }
 
 static inline void closure_init_stack_release(struct closure *cl)
 {
 	memset(cl, 0, sizeof(struct closure));
 	atomic_set_release(&cl->remaining, CLOSURE_REMAINING_INITIALIZER);
+#ifdef CONFIG_DEBUG_CLOSURES
+	cl->magic = CLOSURE_MAGIC_STACK;
+#endif
 }
 
 /**
@@ -446,5 +453,40 @@ do {									\
 	if (!(_cond))							\
 		__closure_wait_event(waitlist, _cond);			\
 } while (0)
+
+#define __closure_wait_event_timeout(waitlist, _cond, _until)		\
+({									\
+	struct closure cl;						\
+	long _t;							\
+									\
+	closure_init_stack(&cl);					\
+									\
+	while (1) {							\
+		closure_wait(waitlist, &cl);				\
+		if (_cond) {						\
+			_t = max_t(long, 1L, _until - jiffies);		\
+			break;						\
+		}							\
+		_t = max_t(long, 0L, _until - jiffies);			\
+		if (!_t)						\
+			break;						\
+		closure_sync_timeout(&cl, _t);				\
+	}								\
+	closure_wake_up(waitlist);					\
+	closure_sync(&cl);						\
+	_t;								\
+})
+
+/*
+ * Returns 0 if timeout expired, remaining time in jiffies (at least 1) if
+ * condition became true
+ */
+#define closure_wait_event_timeout(waitlist, _cond, _timeout)		\
+({									\
+	unsigned long _until = jiffies + _timeout;			\
+	(_cond)								\
+		? max_t(long, 1L, _until - jiffies)			\
+		: __closure_wait_event_timeout(waitlist, _cond, _until);\
+})
 
 #endif /* _LINUX_CLOSURE_H */

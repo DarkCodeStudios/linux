@@ -26,6 +26,11 @@ Dynamic debug provides:
    - format string
    - class name (as known/declared by each module)
 
+NOTE: To actually get the debug-print output on the console, you may
+need to adjust the kernel ``loglevel=``, or use ``ignore_loglevel``.
+Read about these kernel parameters in
+Documentation/admin-guide/kernel-parameters.rst.
+
 Viewing Dynamic Debug Behaviour
 ===============================
 
@@ -218,12 +223,13 @@ The flags are::
   f    Include the function name
   s    Include the source file name
   l    Include line number
+  d    Include call trace
 
 For ``print_hex_dump_debug()`` and ``print_hex_dump_bytes()``, only
 the ``p`` flag has meaning, other flags are ignored.
 
-Note the regexp ``^[-+=][fslmpt_]+$`` matches a flags specification.
-To clear all flags at once, use ``=_`` or ``-fslmpt``.
+Note the regexp ``^[-+=][fslmptd_]+$`` matches a flags specification.
+To clear all flags at once, use ``=_`` or ``-fslmptd``.
 
 
 Debug messages during Boot Process

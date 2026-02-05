@@ -9,6 +9,7 @@
 #include <linux/types.h>
 #include <uapi/linux/btrfs_tree.h>
 #include "fs.h"
+#include "accessors.h"
 
 #define BTRFS_RST_SUPP_BLOCK_GROUP_MASK    (BTRFS_BLOCK_GROUP_DUP |		\
 					    BTRFS_BLOCK_GROUP_RAID1_MASK |	\
@@ -27,6 +28,11 @@ int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 				 u32 stripe_index, struct btrfs_io_stripe *stripe);
 int btrfs_insert_raid_extent(struct btrfs_trans_handle *trans,
 			     struct btrfs_ordered_extent *ordered_extent);
+
+#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
+int btrfs_insert_one_raid_extent(struct btrfs_trans_handle *trans,
+				 struct btrfs_io_context *bioc);
+#endif
 
 static inline bool btrfs_need_stripe_tree_update(struct btrfs_fs_info *fs_info,
 						 u64 map_type)
@@ -48,8 +54,7 @@ static inline bool btrfs_need_stripe_tree_update(struct btrfs_fs_info *fs_info,
 
 static inline int btrfs_num_raid_stripes(u32 item_size)
 {
-	return (item_size - offsetof(struct btrfs_stripe_extent, strides)) /
-		sizeof(struct btrfs_raid_stride);
+	return item_size / sizeof(struct btrfs_raid_stride);
 }
 
 #endif

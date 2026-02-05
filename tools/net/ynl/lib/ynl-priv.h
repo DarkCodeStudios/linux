@@ -25,6 +25,7 @@ enum ynl_policy_type {
 	YNL_PT_UINT,
 	YNL_PT_NUL_STR,
 	YNL_PT_BITFIELD32,
+	YNL_PT_SUBMSG,
 };
 
 enum ynl_parse_result {
@@ -42,20 +43,23 @@ typedef int (*ynl_parse_cb_t)(const struct nlmsghdr *nlh,
 			      struct ynl_parse_arg *yarg);
 
 struct ynl_policy_attr {
-	enum ynl_policy_type type;
+	enum ynl_policy_type type:8;
+	__u8 is_submsg:1;
+	__u8 is_selector:1;
+	__u16 selector_type;
 	unsigned int len;
 	const char *name;
-	struct ynl_policy_nest *nest;
+	const struct ynl_policy_nest *nest;
 };
 
 struct ynl_policy_nest {
 	unsigned int max_attr;
-	struct ynl_policy_attr *table;
+	const struct ynl_policy_attr *table;
 };
 
 struct ynl_parse_arg {
 	struct ynl_sock *ys;
-	struct ynl_policy_nest *rsp_policy;
+	const struct ynl_policy_nest *rsp_policy;
 	void *data;
 };
 
@@ -79,7 +83,7 @@ static inline void *ynl_dump_obj_next(void *obj)
 	struct ynl_dump_list_type *list;
 
 	uptr -= offsetof(struct ynl_dump_list_type, data);
-	list = (void *)uptr;
+	list = (struct ynl_dump_list_type *)uptr;
 	uptr = (unsigned long)list->next;
 	uptr += offsetof(struct ynl_dump_list_type, data);
 
@@ -94,12 +98,16 @@ struct ynl_ntf_base_type {
 	unsigned char data[] __attribute__((aligned(8)));
 };
 
+struct nlmsghdr *ynl_msg_start_req(struct ynl_sock *ys, __u32 id, __u16 flags);
+struct nlmsghdr *ynl_msg_start_dump(struct ynl_sock *ys, __u32 id);
+
 struct nlmsghdr *
 ynl_gemsg_start_req(struct ynl_sock *ys, __u32 id, __u8 cmd, __u8 version);
 struct nlmsghdr *
 ynl_gemsg_start_dump(struct ynl_sock *ys, __u32 id, __u8 cmd, __u8 version);
 
-int ynl_attr_validate(struct ynl_parse_arg *yarg, const struct nlattr *attr);
+int ynl_submsg_failed(struct ynl_parse_arg *yarg, const char *field_name,
+		      const char *sel_name);
 
 /* YNL specific helpers used by the auto-generated code */
 
@@ -119,7 +127,7 @@ struct ynl_dump_state {
 };
 
 struct ynl_ntf_info {
-	struct ynl_policy_nest *policy;
+	const struct ynl_policy_nest *policy;
 	ynl_parse_cb_t cb;
 	size_t alloc_sz;
 	void (*free)(struct ynl_ntf_base_type *ntf);
@@ -139,7 +147,7 @@ int ynl_error_parse(struct ynl_parse_arg *yarg, const char *msg);
 
 static inline struct nlmsghdr *ynl_nlmsg_put_header(void *buf)
 {
-	struct nlmsghdr *nlh = buf;
+	struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
 
 	memset(nlh, 0, sizeof(*nlh));
 	nlh->nlmsg_len = NLMSG_HDRLEN;
@@ -196,7 +204,7 @@ static inline void *ynl_attr_data(const struct nlattr *attr)
 
 static inline void *ynl_attr_data_end(const struct nlattr *attr)
 {
-	return ynl_attr_data(attr) + ynl_attr_data_len(attr);
+	return (char *)ynl_attr_data(attr) + ynl_attr_data_len(attr);
 }
 
 #define ynl_attr_for_each(attr, nlh, fixed_hdr_sz)			\
@@ -204,10 +212,14 @@ static inline void *ynl_attr_data_end(const struct nlattr *attr)
 				     NLMSG_HDRLEN + fixed_hdr_sz); attr; \
 	     (attr) = ynl_attr_next(ynl_nlmsg_end_addr(nlh), attr))
 
-#define ynl_attr_for_each_nested(attr, outer)				\
+#define ynl_attr_for_each_nested_off(attr, outer, offset)		\
 	for ((attr) = ynl_attr_first(outer, outer->nla_len,		\
-				     sizeof(struct nlattr)); attr;	\
+				     sizeof(struct nlattr) + offset);	\
+	     attr;							\
 	     (attr) = ynl_attr_next(ynl_attr_data_end(outer), attr))
+
+#define ynl_attr_for_each_nested(attr, outer)				\
+	ynl_attr_for_each_nested_off(attr, outer, 0)
 
 #define ynl_attr_for_each_payload(start, len, attr)			\
 	for ((attr) = ynl_attr_first(start, len, 0); attr;		\
@@ -228,7 +240,7 @@ ynl_attr_next(const void *end, const struct nlattr *prev)
 {
 	struct nlattr *attr;
 
-	attr = (void *)((char *)prev + NLA_ALIGN(prev->nla_len));
+	attr = (struct nlattr *)((char *)prev + NLA_ALIGN(prev->nla_len));
 	return ynl_attr_if_good(end, attr);
 }
 
@@ -237,8 +249,8 @@ ynl_attr_first(const void *start, size_t len, size_t skip)
 {
 	struct nlattr *attr;
 
-	attr = (void *)((char *)start + NLMSG_ALIGN(skip));
-	return ynl_attr_if_good(start + len, attr);
+	attr = (struct nlattr *)((char *)start + NLMSG_ALIGN(skip));
+	return ynl_attr_if_good((char *)start + len, attr);
 }
 
 static inline bool
@@ -262,9 +274,9 @@ ynl_attr_nest_start(struct nlmsghdr *nlh, unsigned int attr_type)
 	struct nlattr *attr;
 
 	if (__ynl_attr_put_overflow(nlh, 0))
-		return ynl_nlmsg_end_addr(nlh) - NLA_HDRLEN;
+		return (struct nlattr *)ynl_nlmsg_end_addr(nlh) - 1;
 
-	attr = ynl_nlmsg_end_addr(nlh);
+	attr = (struct nlattr *)ynl_nlmsg_end_addr(nlh);
 	attr->nla_type = attr_type | NLA_F_NESTED;
 	nlh->nlmsg_len += NLA_HDRLEN;
 
@@ -286,7 +298,7 @@ ynl_attr_put(struct nlmsghdr *nlh, unsigned int attr_type,
 	if (__ynl_attr_put_overflow(nlh, size))
 		return;
 
-	attr = ynl_nlmsg_end_addr(nlh);
+	attr = (struct nlattr *)ynl_nlmsg_end_addr(nlh);
 	attr->nla_type = attr_type;
 	attr->nla_len = NLA_HDRLEN + size;
 
@@ -301,15 +313,15 @@ ynl_attr_put_str(struct nlmsghdr *nlh, unsigned int attr_type, const char *str)
 	struct nlattr *attr;
 	size_t len;
 
-	len = strlen(str);
+	len = strlen(str) + 1;
 	if (__ynl_attr_put_overflow(nlh, len))
 		return;
 
-	attr = ynl_nlmsg_end_addr(nlh);
+	attr = (struct nlattr *)ynl_nlmsg_end_addr(nlh);
 	attr->nla_type = attr_type;
 
-	strcpy(ynl_attr_data(attr), str);
-	attr->nla_len = NLA_HDRLEN + NLA_ALIGN(len);
+	strcpy((char *)ynl_attr_data(attr), str);
+	attr->nla_len = NLA_HDRLEN + len;
 
 	nlh->nlmsg_len += NLMSG_ALIGN(attr->nla_len);
 }
@@ -453,5 +465,14 @@ ynl_attr_put_sint(struct nlmsghdr *nlh, __u16 type, __s64 data)
 		ynl_attr_put_s32(nlh, type, data);
 	else
 		ynl_attr_put_s64(nlh, type, data);
+}
+
+int __ynl_attr_validate(struct ynl_parse_arg *yarg, const struct nlattr *attr,
+			unsigned int type);
+
+static inline int ynl_attr_validate(struct ynl_parse_arg *yarg,
+				    const struct nlattr *attr)
+{
+	return __ynl_attr_validate(yarg, attr, ynl_attr_type(attr));
 }
 #endif

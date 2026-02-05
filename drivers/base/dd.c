@@ -25,6 +25,7 @@
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/async.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/devinfo.h>
 #include <linux/slab.h>
@@ -192,7 +193,7 @@ void driver_deferred_probe_trigger(void)
 	 * Kick the re-probe thread.  It may already be scheduled, but it is
 	 * safe to kick it again.
 	 */
-	queue_work(system_unbound_wq, &deferred_probe_work);
+	queue_work(system_dfl_wq, &deferred_probe_work);
 }
 
 /**
@@ -248,7 +249,7 @@ static int deferred_devs_show(struct seq_file *s, void *data)
 
 	list_for_each_entry(curr, &deferred_probe_pending_list, deferred_probe)
 		seq_printf(s, "%s\t%s", dev_name(curr->device),
-			   curr->device->p->deferred_probe_reason ?: "\n");
+			   curr->deferred_probe_reason ?: "\n");
 
 	mutex_unlock(&deferred_probe_mutex);
 
@@ -393,6 +394,7 @@ bool device_is_bound(struct device *dev)
 {
 	return dev->p && klist_node_attached(&dev->p->knode_driver);
 }
+EXPORT_SYMBOL_GPL(device_is_bound);
 
 static void driver_bound(struct device *dev)
 {
@@ -546,11 +548,14 @@ static DEVICE_ATTR_RW(state_synced);
 static void device_unbind_cleanup(struct device *dev)
 {
 	devres_release_all(dev);
+	if (dev->driver->p_cb.post_unbind_rust)
+		dev->driver->p_cb.post_unbind_rust(dev);
 	arch_teardown_dma_ops(dev);
 	kfree(dev->dma_range_map);
 	dev->dma_range_map = NULL;
-	dev->driver = NULL;
+	device_set_driver(dev, NULL);
 	dev_set_drvdata(dev, NULL);
+	dev_pm_domain_detach(dev, dev->power.detach_power_off);
 	if (dev->pm_domain && dev->pm_domain->dismiss)
 		dev->pm_domain->dismiss(dev);
 	pm_runtime_reinit(dev);
@@ -568,7 +573,7 @@ static void device_remove(struct device *dev)
 		dev->driver->remove(dev);
 }
 
-static int call_driver_probe(struct device *dev, struct device_driver *drv)
+static int call_driver_probe(struct device *dev, const struct device_driver *drv)
 {
 	int ret = 0;
 
@@ -599,7 +604,7 @@ static int call_driver_probe(struct device *dev, struct device_driver *drv)
 	return ret;
 }
 
-static int really_probe(struct device *dev, struct device_driver *drv)
+static int really_probe(struct device *dev, const struct device_driver *drv)
 {
 	bool test_remove = IS_ENABLED(CONFIG_DEBUG_TEST_DRIVER_REMOVE) &&
 			   !drv->suppress_bind_attrs;
@@ -628,7 +633,7 @@ static int really_probe(struct device *dev, struct device_driver *drv)
 	}
 
 re_probe:
-	dev->driver = drv;
+	device_set_driver(dev, drv);
 
 	/* If using pinctrl, bind pins now before probing */
 	ret = pinctrl_bind_pins(dev);
@@ -727,7 +732,7 @@ done:
 /*
  * For initcall_debug, show the driver probe time.
  */
-static int really_probe_debug(struct device *dev, struct device_driver *drv)
+static int really_probe_debug(struct device *dev, const struct device_driver *drv)
 {
 	ktime_t calltime, rettime;
 	int ret;
@@ -774,7 +779,7 @@ void wait_for_device_probe(void)
 }
 EXPORT_SYMBOL_GPL(wait_for_device_probe);
 
-static int __driver_probe_device(struct device_driver *drv, struct device *dev)
+static int __driver_probe_device(const struct device_driver *drv, struct device *dev)
 {
 	int ret = 0;
 
@@ -819,7 +824,7 @@ static int __driver_probe_device(struct device_driver *drv, struct device *dev)
  *
  * If the device has a parent, runtime-resume the parent before driver probing.
  */
-static int driver_probe_device(struct device_driver *drv, struct device *dev)
+static int driver_probe_device(const struct device_driver *drv, struct device *dev)
 {
 	int trigger_count = atomic_read(&deferred_trigger_count);
 	int ret;
@@ -863,7 +868,7 @@ static int __init save_async_options(char *buf)
 }
 __setup("driver_async_probe=", save_async_options);
 
-static bool driver_allows_async_probing(struct device_driver *drv)
+static bool driver_allows_async_probing(const struct device_driver *drv)
 {
 	switch (drv->probe_type) {
 	case PROBE_PREFER_ASYNCHRONOUS:
@@ -1012,7 +1017,7 @@ static int __device_attach(struct device *dev, bool allow_async)
 		if (ret == 0)
 			ret = 1;
 		else {
-			dev->driver = NULL;
+			device_set_driver(dev, NULL);
 			ret = 0;
 		}
 	} else {
@@ -1074,7 +1079,15 @@ EXPORT_SYMBOL_GPL(device_attach);
 
 void device_initial_probe(struct device *dev)
 {
-	__device_attach(dev, true);
+	struct subsys_private *sp = bus_to_subsys(dev->bus);
+
+	if (!sp)
+		return;
+
+	if (sp->drivers_autoprobe)
+		__device_attach(dev, true);
+
+	subsys_put(sp);
 }
 
 /*
@@ -1117,7 +1130,7 @@ static void __device_driver_unlock(struct device *dev, struct device *parent)
  * Manually attach driver to a device. Will acquire both @dev lock and
  * @dev->parent lock if needed. Returns 0 on success, -ERR on failure.
  */
-int device_driver_attach(struct device_driver *drv, struct device *dev)
+int device_driver_attach(const struct device_driver *drv, struct device *dev)
 {
 	int ret;
 
@@ -1137,7 +1150,7 @@ EXPORT_SYMBOL_GPL(device_driver_attach);
 static void __driver_attach_async_helper(void *_dev, async_cookie_t cookie)
 {
 	struct device *dev = _dev;
-	struct device_driver *drv;
+	const struct device_driver *drv;
 	int ret;
 
 	__device_driver_lock(dev, dev->parent);
@@ -1153,7 +1166,7 @@ static void __driver_attach_async_helper(void *_dev, async_cookie_t cookie)
 
 static int __driver_attach(struct device *dev, void *data)
 {
-	struct device_driver *drv = data;
+	const struct device_driver *drv = data;
 	bool async = false;
 	int ret;
 
@@ -1226,9 +1239,10 @@ static int __driver_attach(struct device *dev, void *data)
  * returns 0 and the @dev->driver is set, we've found a
  * compatible pair.
  */
-int driver_attach(struct device_driver *drv)
+int driver_attach(const struct device_driver *drv)
 {
-	return bus_for_each_dev(drv->bus, NULL, drv, __driver_attach);
+	/* The (void *) will be put back to const * in __driver_attach() */
+	return bus_for_each_dev(drv->bus, NULL, (void *)drv, __driver_attach);
 }
 EXPORT_SYMBOL_GPL(driver_attach);
 
@@ -1284,7 +1298,7 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 }
 
 void device_release_driver_internal(struct device *dev,
-				    struct device_driver *drv,
+				    const struct device_driver *drv,
 				    struct device *parent)
 {
 	__device_driver_lock(dev, parent);
@@ -1333,7 +1347,7 @@ void device_driver_detach(struct device *dev)
  * driver_detach - detach driver from all devices it controls.
  * @drv: driver.
  */
-void driver_detach(struct device_driver *drv)
+void driver_detach(const struct device_driver *drv)
 {
 	struct device_private *dev_prv;
 	struct device *dev;

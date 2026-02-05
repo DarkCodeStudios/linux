@@ -199,7 +199,7 @@ static blk_status_t ubiblock_read(struct request *req)
 	 * and ubi_read_sg() will check that limit.
 	 */
 	ubi_sgl_init(&pdu->usgl);
-	blk_rq_map_sg(req->q, req, pdu->usgl.sg);
+	blk_rq_map_sg(req, pdu->usgl.sg);
 
 	while (bytes_left) {
 		/*
@@ -282,12 +282,12 @@ static void ubiblock_release(struct gendisk *gd)
 	mutex_unlock(&dev->dev_mutex);
 }
 
-static int ubiblock_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+static int ubiblock_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 {
 	/* Some tools might require this information */
 	geo->heads = 1;
 	geo->cylinders = 1;
-	geo->sectors = get_capacity(bdev->bd_disk);
+	geo->sectors = get_capacity(disk);
 	geo->start = 0;
 	return 0;
 }
@@ -383,14 +383,15 @@ int ubiblock_create(struct ubi_volume_info *vi)
 	dev->tag_set.ops = &ubiblock_mq_ops;
 	dev->tag_set.queue_depth = 64;
 	dev->tag_set.numa_node = NUMA_NO_NODE;
-	dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING;
+	dev->tag_set.flags = BLK_MQ_F_BLOCKING;
 	dev->tag_set.cmd_size = sizeof(struct ubiblock_pdu);
 	dev->tag_set.driver_data = dev;
 	dev->tag_set.nr_hw_queues = 1;
 
 	ret = blk_mq_alloc_tag_set(&dev->tag_set);
 	if (ret) {
-		dev_err(disk_to_dev(dev->gd), "blk_mq_alloc_tag_set failed");
+		pr_err("ubiblock%d_%d: blk_mq_alloc_tag_set failed\n",
+			dev->ubi_num, dev->vol_id);
 		goto out_free_dev;
 	}
 
@@ -407,8 +408,8 @@ int ubiblock_create(struct ubi_volume_info *vi)
 	gd->minors = 1;
 	gd->first_minor = idr_alloc(&ubiblock_minor_idr, dev, 0, 0, GFP_KERNEL);
 	if (gd->first_minor < 0) {
-		dev_err(disk_to_dev(gd),
-			"block: dynamic minor allocation failed");
+		pr_err("ubiblock%d_%d: block: dynamic minor allocation failed\n",
+			dev->ubi_num, dev->vol_id);
 		ret = -ENODEV;
 		goto out_cleanup_disk;
 	}
@@ -669,7 +670,7 @@ err_unreg:
 	return ret;
 }
 
-void __exit ubiblock_exit(void)
+void ubiblock_exit(void)
 {
 	ubi_unregister_volume_notifier(&ubiblock_notifier);
 	ubiblock_remove_all();

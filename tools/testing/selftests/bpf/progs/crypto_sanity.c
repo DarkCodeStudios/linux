@@ -14,7 +14,7 @@ unsigned char key[256] = {};
 u16 udp_test_port = 7777;
 u32 authsize, key_len;
 char algo[128] = {};
-char dst[16] = {};
+char dst[16] = {}, dst_bad[8] = {};
 int status;
 
 static int skb_dynptr_validate(struct __sk_buff *skb, struct bpf_dynptr *psrc)
@@ -59,10 +59,9 @@ int skb_crypto_setup(void *ctx)
 		.authsize = authsize,
 	};
 	struct bpf_crypto_ctx *cctx;
-	int err = 0;
+	int err;
 
 	status = 0;
-
 	if (key_len > 256) {
 		status = -EINVAL;
 		return 0;
@@ -70,8 +69,8 @@ int skb_crypto_setup(void *ctx)
 
 	__builtin_memcpy(&params.algo, algo, sizeof(algo));
 	__builtin_memcpy(&params.key, key, sizeof(key));
-	cctx = bpf_crypto_ctx_create(&params, sizeof(params), &err);
 
+	cctx = bpf_crypto_ctx_create(&params, sizeof(params), &err);
 	if (!cctx) {
 		status = err;
 		return 0;
@@ -80,7 +79,6 @@ int skb_crypto_setup(void *ctx)
 	err = crypto_ctx_insert(cctx);
 	if (err && err != -EEXIST)
 		status = err;
-
 	return 0;
 }
 
@@ -89,9 +87,10 @@ int decrypt_sanity(struct __sk_buff *skb)
 {
 	struct __crypto_ctx_value *v;
 	struct bpf_crypto_ctx *ctx;
-	struct bpf_dynptr psrc, pdst, iv;
+	struct bpf_dynptr psrc, pdst;
 	int err;
 
+	status = 0;
 	err = skb_dynptr_validate(skb, &psrc);
 	if (err < 0) {
 		status = err;
@@ -110,17 +109,23 @@ int decrypt_sanity(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	/* dst is a global variable to make testing part easier to check. In real
-	 * production code, a percpu map should be used to store the result.
+	/* Check also bad case where the dst buffer is smaller than the
+	 * skb's linear section.
+	 */
+	bpf_dynptr_from_mem(dst_bad, sizeof(dst_bad), 0, &pdst);
+	status = bpf_crypto_decrypt(ctx, &psrc, &pdst, NULL);
+	if (!status)
+		status = -EIO;
+	if (status != -EINVAL)
+		goto err;
+
+	/* dst is a global variable to make testing part easier to check.
+	 * In real production code, a percpu map should be used to store
+	 * the result.
 	 */
 	bpf_dynptr_from_mem(dst, sizeof(dst), 0, &pdst);
-	/* iv dynptr has to be initialized with 0 size, but proper memory region
-	 * has to be provided anyway
-	 */
-	bpf_dynptr_from_mem(dst, 0, 0, &iv);
-
-	status = bpf_crypto_decrypt(ctx, &psrc, &pdst, &iv);
-
+	status = bpf_crypto_decrypt(ctx, &psrc, &pdst, NULL);
+err:
 	return TC_ACT_SHOT;
 }
 
@@ -129,11 +134,10 @@ int encrypt_sanity(struct __sk_buff *skb)
 {
 	struct __crypto_ctx_value *v;
 	struct bpf_crypto_ctx *ctx;
-	struct bpf_dynptr psrc, pdst, iv;
+	struct bpf_dynptr psrc, pdst;
 	int err;
 
 	status = 0;
-
 	err = skb_dynptr_validate(skb, &psrc);
 	if (err < 0) {
 		status = err;
@@ -152,17 +156,23 @@ int encrypt_sanity(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	/* dst is a global variable to make testing part easier to check. In real
-	 * production code, a percpu map should be used to store the result.
+	/* Check also bad case where the dst buffer is smaller than the
+	 * skb's linear section.
+	 */
+	bpf_dynptr_from_mem(dst_bad, sizeof(dst_bad), 0, &pdst);
+	status = bpf_crypto_encrypt(ctx, &psrc, &pdst, NULL);
+	if (!status)
+		status = -EIO;
+	if (status != -EINVAL)
+		goto err;
+
+	/* dst is a global variable to make testing part easier to check.
+	 * In real production code, a percpu map should be used to store
+	 * the result.
 	 */
 	bpf_dynptr_from_mem(dst, sizeof(dst), 0, &pdst);
-	/* iv dynptr has to be initialized with 0 size, but proper memory region
-	 * has to be provided anyway
-	 */
-	bpf_dynptr_from_mem(dst, 0, 0, &iv);
-
-	status = bpf_crypto_encrypt(ctx, &psrc, &pdst, &iv);
-
+	status = bpf_crypto_encrypt(ctx, &psrc, &pdst, NULL);
+err:
 	return TC_ACT_SHOT;
 }
 

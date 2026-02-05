@@ -33,7 +33,7 @@
 #include <crypto/ecdh.h>
 #include <crypto/rng.h>
 #include <crypto/internal/ecc.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/ratelimit.h>
 
 #include "ecc_curve_defs.h"
@@ -71,14 +71,14 @@ EXPORT_SYMBOL(ecc_get_curve);
 void ecc_digits_from_bytes(const u8 *in, unsigned int nbytes,
 			   u64 *out, unsigned int ndigits)
 {
-	int diff = ndigits - DIV_ROUND_UP(nbytes, sizeof(u64));
+	int diff = ndigits - DIV_ROUND_UP_POW2(nbytes, sizeof(u64));
 	unsigned int o = nbytes & 7;
 	__be64 msd = 0;
 
 	/* diff > 0: not enough input bytes: set most significant digits to 0 */
 	if (diff > 0) {
 		ndigits -= diff;
-		memset(&out[ndigits - 1], 0, diff * sizeof(u64));
+		memset(&out[ndigits], 0, diff * sizeof(u64));
 	}
 
 	if (o) {
@@ -1715,4 +1715,5 @@ out:
 }
 EXPORT_SYMBOL(crypto_ecdh_shared_secret);
 
+MODULE_DESCRIPTION("core elliptic curve module");
 MODULE_LICENSE("Dual BSD/GPL");

@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2016 Intel Corporation
  */
 
@@ -535,7 +534,7 @@ struct drm_i915_gem_object {
 	 *   I915_CACHE_NONE. The only exception is userptr objects, where we
 	 *   instead force I915_CACHE_LLC, but we also don't allow userspace to
 	 *   ever change the @cache_level for such objects. Another special case
-	 *   is dma-buf, which doesn't rely on @cache_dirty,  but there we
+	 *   is dma-buf, which doesn't rely on @cache_dirty, but there we
 	 *   always do a forced flush when acquiring the pages, if there is a
 	 *   chance that the pages can be read directly from main memory with
 	 *   the GPU.
@@ -575,7 +574,7 @@ struct drm_i915_gem_object {
 	 */
 	u16 write_domain;
 
-	struct intel_frontbuffer __rcu *frontbuffer;
+	struct i915_frontbuffer __rcu *frontbuffer;
 
 	/** Current tiling stride for the object, if it's tiled. */
 	unsigned int tiling_and_stride;

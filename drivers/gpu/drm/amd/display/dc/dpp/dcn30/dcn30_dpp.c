@@ -64,23 +64,40 @@ void dpp30_read_state(struct dpp *dpp_base, struct dcn_dpp_state *s)
 	}
 
 	// Shaper LUT (RAM), 3D LUT (mode, bit-depth, size)
-	REG_GET(CM_SHAPER_CONTROL,
-		CM_SHAPER_LUT_MODE, &s->shaper_lut_mode);
-	REG_GET(CM_3DLUT_MODE,
-		CM_3DLUT_MODE_CURRENT, &s->lut3d_mode);
-	REG_GET(CM_3DLUT_READ_WRITE_CONTROL,
-		CM_3DLUT_30BIT_EN, &s->lut3d_bit_depth);
-	REG_GET(CM_3DLUT_MODE,
-		CM_3DLUT_SIZE, &s->lut3d_size);
+	if (REG(CM_SHAPER_CONTROL))
+		REG_GET(CM_SHAPER_CONTROL, CM_SHAPER_LUT_MODE, &s->shaper_lut_mode);
+	if (REG(CM_3DLUT_MODE))
+		REG_GET(CM_3DLUT_MODE, CM_3DLUT_MODE_CURRENT, &s->lut3d_mode);
+	if (REG(CM_3DLUT_READ_WRITE_CONTROL))
+		REG_GET(CM_3DLUT_READ_WRITE_CONTROL, CM_3DLUT_30BIT_EN, &s->lut3d_bit_depth);
+	if (REG(CM_3DLUT_MODE))
+		REG_GET(CM_3DLUT_MODE, CM_3DLUT_SIZE, &s->lut3d_size);
 
 	// Blend/Out Gamma (RAM)
-	REG_GET(CM_BLNDGAM_CONTROL,
-		CM_BLNDGAM_MODE_CURRENT, &s->rgam_lut_mode);
-	if (s->rgam_lut_mode){
-		REG_GET(CM_BLNDGAM_CONTROL, CM_BLNDGAM_SELECT_CURRENT, &rgam_lut_mode);
-		if (!rgam_lut_mode)
-			s->rgam_lut_mode = LUT_RAM_A; // Otherwise, LUT_RAM_B
+	if (REG(CM_BLNDGAM_CONTROL)) {
+		REG_GET(CM_BLNDGAM_CONTROL, CM_BLNDGAM_MODE_CURRENT, &s->rgam_lut_mode);
+		if (s->rgam_lut_mode) {
+			REG_GET(CM_BLNDGAM_CONTROL, CM_BLNDGAM_SELECT_CURRENT, &rgam_lut_mode);
+			if (!rgam_lut_mode)
+				s->rgam_lut_mode = LUT_RAM_A; // Otherwise, LUT_RAM_B
+		}
 	}
+}
+
+void dpp30_read_reg_state(struct dpp *dpp_base, struct dcn_dpp_reg_state *dpp_reg_state)
+{
+	struct dcn3_dpp *dpp = TO_DCN30_DPP(dpp_base);
+
+	dpp_reg_state->recout_start = REG_READ(RECOUT_START);
+	dpp_reg_state->recout_size = REG_READ(RECOUT_SIZE);
+	dpp_reg_state->scl_horz_filter_scale_ratio = REG_READ(SCL_HORZ_FILTER_SCALE_RATIO);
+	dpp_reg_state->scl_vert_filter_scale_ratio = REG_READ(SCL_VERT_FILTER_SCALE_RATIO);
+	dpp_reg_state->scl_mode = REG_READ(SCL_MODE);
+	dpp_reg_state->cm_control = REG_READ(CM_CONTROL);
+	dpp_reg_state->dpp_control = REG_READ(DPP_CONTROL);
+	dpp_reg_state->dscl_control = REG_READ(DSCL_CONTROL);
+	dpp_reg_state->obuf_control = REG_READ(OBUF_CONTROL);
+	dpp_reg_state->mpc_size = REG_READ(MPC_SIZE);
 }
 
 /*program post scaler scs block in dpp CM*/
@@ -218,7 +235,6 @@ void dpp3_cnv_setup (
 	uint32_t alpha_plane_enable = 0;
 	uint32_t dealpha_en = 0, dealpha_ablnd_en = 0;
 	uint32_t realpha_en = 0, realpha_ablnd_en = 0;
-	uint32_t program_prealpha_dealpha = 0;
 	struct out_csc_color_matrix tbl_entry;
 	int i;
 
@@ -346,10 +362,6 @@ void dpp3_cnv_setup (
 			CNVC_ALPHA_PLANE_ENABLE, alpha_plane_enable);
 	REG_UPDATE(FORMAT_CONTROL, FORMAT_CONTROL__ALPHA_EN, alpha_en);
 
-	if (program_prealpha_dealpha) {
-		dealpha_en = 1;
-		realpha_en = 1;
-	}
 	REG_SET_2(PRE_DEALPHA, 0,
 			PRE_DEALPHA_EN, dealpha_en,
 			PRE_DEALPHA_ABLND_EN, dealpha_ablnd_en);
@@ -400,17 +412,21 @@ void dpp3_set_cursor_attributes(
 		}
 	}
 
-	REG_UPDATE_3(CURSOR0_CONTROL,
-			CUR0_MODE, color_format,
-			CUR0_EXPANSION_MODE, 0,
-			CUR0_ROM_EN, cur_rom_en);
+	if (!dpp_base->cursor_offload)
+		REG_UPDATE_3(CURSOR0_CONTROL,
+				CUR0_MODE, color_format,
+				CUR0_EXPANSION_MODE, 0,
+				CUR0_ROM_EN, cur_rom_en);
 
 	if (color_format == CURSOR_MODE_MONO) {
 		/* todo: clarify what to program these to */
-		REG_UPDATE(CURSOR0_COLOR0,
-				CUR0_COLOR0, 0x00000000);
-		REG_UPDATE(CURSOR0_COLOR1,
-				CUR0_COLOR1, 0xFFFFFFFF);
+
+		if (!dpp_base->cursor_offload) {
+			REG_UPDATE(CURSOR0_COLOR0,
+					CUR0_COLOR0, 0x00000000);
+			REG_UPDATE(CURSOR0_COLOR1,
+					CUR0_COLOR1, 0xFFFFFFFF);
+		}
 	}
 
 	dpp_base->att.cur0_ctl.bits.expansion_mode = 0;
@@ -428,11 +444,6 @@ bool dpp3_get_optimal_number_of_taps(
 	int max_taps_y, max_taps_c;
 	int min_taps_y, min_taps_c;
 	enum lb_memory_config lb_config;
-
-	if (scl_data->viewport.width > scl_data->h_active &&
-		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
-		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
-		return false;
 
 	/*
 	 * Set default taps if none are provided
@@ -470,6 +481,12 @@ bool dpp3_get_optimal_number_of_taps(
 		scl_data->taps.h_taps_c = in_taps->h_taps_c - 1;
 	else
 		scl_data->taps.h_taps_c = in_taps->h_taps_c;
+
+	// Avoid null data in the scl data with this early return, proceed non-adaptive calcualtion first
+	if (scl_data->viewport.width > scl_data->h_active &&
+		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
+		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
+		return false;
 
 	/*Ensure we can support the requested number of vtaps*/
 	min_taps_y = dc_fixpt_ceil(scl_data->ratios.vert);
@@ -581,9 +598,6 @@ static void dpp3_power_on_blnd_lut(
 			dpp_base->ctx->dc->optimized_required = true;
 			dpp_base->deferred_reg_writes.bits.disable_blnd_lut = true;
 		}
-	} else {
-		REG_SET(CM_MEM_PWR_CTRL, 0,
-				BLNDGAM_MEM_PWR_FORCE, power_on == true ? 0 : 1);
 	}
 }
 
@@ -793,8 +807,7 @@ static bool dpp3_program_blnd_lut(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		REG_SET(CM_BLNDGAM_CONTROL, 0, CM_BLNDGAM_MODE, 0);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_blnd_lut(dpp_base, false);
+		dpp3_power_on_blnd_lut(dpp_base, false);
 		return false;
 	}
 
@@ -1207,8 +1220,7 @@ static bool dpp3_program_shaper(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		REG_SET(CM_SHAPER_CONTROL, 0, CM_SHAPER_LUT_MODE, 0);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_shaper(dpp_base, false);
+		dpp3_power_on_shaper(dpp_base, false);
 		return false;
 	}
 
@@ -1402,8 +1414,7 @@ static bool dpp3_program_3dlut(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		dpp3_set_3dlut_mode(dpp_base, LUT_BYPASS, false, false);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_hdr3dlut(dpp_base, false);
+		dpp3_power_on_hdr3dlut(dpp_base, false);
 		return false;
 	}
 
@@ -1500,6 +1511,7 @@ static struct dpp_funcs dcn30_dpp_funcs = {
 	.dpp_dppclk_control		= dpp1_dppclk_control,
 	.dpp_set_hdr_multiplier		= dpp3_set_hdr_multiplier,
 	.dpp_get_gamut_remap		= dpp3_cm_get_gamut_remap,
+	.dpp_force_disable_cursor 	= dpp_force_disable_cursor,
 };
 
 

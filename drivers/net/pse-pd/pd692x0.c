@@ -12,6 +12,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pse-pd/pse.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
 
 #define PD692X0_PSE_NAME "pd692x0_pse"
 
@@ -27,6 +29,8 @@
 #define PD692X0_FW_MAJ_VER	3
 #define PD692X0_FW_MIN_VER	5
 #define PD692X0_FW_PATCH_VER	5
+
+#define PD692X0_USER_BYTE	42
 
 enum pd692x0_fw_state {
 	PD692X0_FW_UNKNOWN,
@@ -73,9 +77,20 @@ enum {
 	PD692X0_MSG_SET_PORT_PARAM,
 	PD692X0_MSG_GET_PORT_STATUS,
 	PD692X0_MSG_DOWNLOAD_CMD,
+	PD692X0_MSG_GET_PORT_CLASS,
+	PD692X0_MSG_GET_PORT_MEAS,
+	PD692X0_MSG_GET_PORT_PARAM,
+	PD692X0_MSG_GET_POWER_BANK,
+	PD692X0_MSG_SET_POWER_BANK,
+	PD692X0_MSG_SET_USER_BYTE,
 
 	/* add new message above here */
 	PD692X0_MSG_CNT
+};
+
+struct pd692x0_matrix {
+	u8 hw_port_a;
+	u8 hw_port_b;
 };
 
 struct pd692x0_priv {
@@ -91,7 +106,12 @@ struct pd692x0_priv {
 	bool last_cmd_key;
 	unsigned long last_cmd_key_time;
 
+	bool cfg_saved;
 	enum ethtool_c33_pse_admin_state admin_state[PD692X0_MAX_PIS];
+	struct regulator_dev *manager_reg[PD692X0_MAX_MANAGERS];
+	int manager_pw_budget[PD692X0_MAX_MANAGERS];
+	int nmanagers;
+	struct pd692x0_matrix *port_matrix;
 };
 
 /* Template list of communication messages. The non-null bytes defined here
@@ -134,7 +154,7 @@ static const struct pd692x0_msg pd692x0_msg_template_list[PD692X0_MSG_CNT] = {
 	[PD692X0_MSG_SET_PORT_PARAM] = {
 		.key = PD692X0_KEY_CMD,
 		.sub = {0x05, 0xc0},
-		.data = {   0, 0xff, 0xff, 0xff,
+		.data = { 0xf, 0xff, 0xff, 0xff,
 			 0x4e, 0x4e, 0x4e, 0x4e},
 	},
 	[PD692X0_MSG_GET_PORT_STATUS] = {
@@ -147,6 +167,40 @@ static const struct pd692x0_msg pd692x0_msg_template_list[PD692X0_MSG_CNT] = {
 		.key = PD692X0_KEY_PRG,
 		.sub = {0xff, 0x99, 0x15},
 		.data = {0x16, 0x16, 0x99, 0x4e,
+			 0x4e, 0x4e, 0x4e, 0x4e},
+	},
+	[PD692X0_MSG_GET_PORT_CLASS] = {
+		.key = PD692X0_KEY_REQ,
+		.sub = {0x05, 0xc4},
+		.data = {0x4e, 0x4e, 0x4e, 0x4e,
+			 0x4e, 0x4e, 0x4e, 0x4e},
+	},
+	[PD692X0_MSG_GET_PORT_MEAS] = {
+		.key = PD692X0_KEY_REQ,
+		.sub = {0x05, 0xc5},
+		.data = {0x4e, 0x4e, 0x4e, 0x4e,
+			 0x4e, 0x4e, 0x4e, 0x4e},
+	},
+	[PD692X0_MSG_GET_PORT_PARAM] = {
+		.key = PD692X0_KEY_REQ,
+		.sub = {0x05, 0xc0},
+		.data = {0x4e, 0x4e, 0x4e, 0x4e,
+			 0x4e, 0x4e, 0x4e, 0x4e},
+	},
+	[PD692X0_MSG_GET_POWER_BANK] = {
+		.key = PD692X0_KEY_REQ,
+		.sub = {0x07, 0x0b, 0x57},
+		.data = {   0, 0x4e, 0x4e, 0x4e,
+			 0x4e, 0x4e, 0x4e, 0x4e},
+	},
+	[PD692X0_MSG_SET_POWER_BANK] = {
+		.key = PD692X0_KEY_CMD,
+		.sub = {0x07, 0x0b, 0x57},
+	},
+	[PD692X0_MSG_SET_USER_BYTE] = {
+		.key = PD692X0_KEY_PRG,
+		.sub = {0x41, PD692X0_USER_BYTE},
+		.data = {0x4e, 0x4e, 0x4e, 0x4e,
 			 0x4e, 0x4e, 0x4e, 0x4e},
 	},
 };
@@ -410,7 +464,207 @@ static int pd692x0_pi_disable(struct pse_controller_dev *pcdev, int id)
 	return 0;
 }
 
-static int pd692x0_pi_is_enabled(struct pse_controller_dev *pcdev, int id)
+struct pd692x0_pse_ext_state_mapping {
+	u32 status_code;
+	enum ethtool_c33_pse_ext_state pse_ext_state;
+	u32 pse_ext_substate;
+};
+
+static const struct pd692x0_pse_ext_state_mapping
+pd692x0_pse_ext_state_map[] = {
+	{0x06, ETHTOOL_C33_PSE_EXT_STATE_OPTION_VPORT_LIM,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OPTION_VPORT_LIM_HIGH_VOLTAGE},
+	{0x07, ETHTOOL_C33_PSE_EXT_STATE_OPTION_VPORT_LIM,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OPTION_VPORT_LIM_LOW_VOLTAGE},
+	{0x08, ETHTOOL_C33_PSE_EXT_STATE_MR_PSE_ENABLE,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_MR_PSE_ENABLE_DISABLE_PIN_ACTIVE},
+	{0x0C, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_NON_EXISTING_PORT},
+	{0x11, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_UNDEFINED_PORT},
+	{0x12, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_INTERNAL_HW_FAULT},
+	{0x1B, ETHTOOL_C33_PSE_EXT_STATE_OPTION_DETECT_TED,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OPTION_DETECT_TED_DET_IN_PROCESS},
+	{0x1C, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_UNKNOWN_PORT_STATUS},
+	{0x1E, ETHTOOL_C33_PSE_EXT_STATE_MR_MPS_VALID,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_MR_MPS_VALID_DETECTED_UNDERLOAD},
+	{0x1F, ETHTOOL_C33_PSE_EXT_STATE_OVLD_DETECTED,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OVLD_DETECTED_OVERLOAD},
+	{0x20, ETHTOOL_C33_PSE_EXT_STATE_POWER_NOT_AVAILABLE,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_POWER_NOT_AVAILABLE_BUDGET_EXCEEDED},
+	{0x21, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_INTERNAL_HW_FAULT},
+	{0x22, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_CONFIG_CHANGE},
+	{0x24, ETHTOOL_C33_PSE_EXT_STATE_OPTION_VPORT_LIM,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OPTION_VPORT_LIM_VOLTAGE_INJECTION},
+	{0x25, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_UNKNOWN_PORT_STATUS},
+	{0x34, ETHTOOL_C33_PSE_EXT_STATE_SHORT_DETECTED,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_SHORT_DETECTED_SHORT_CONDITION},
+	{0x35, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_DETECTED_OVER_TEMP},
+	{0x36, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_DETECTED_OVER_TEMP},
+	{0x37, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_UNKNOWN_PORT_STATUS},
+	{0x3C, ETHTOOL_C33_PSE_EXT_STATE_POWER_NOT_AVAILABLE,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_POWER_NOT_AVAILABLE_PORT_PW_LIMIT_EXCEEDS_CONTROLLER_BUDGET},
+	{0x3D, ETHTOOL_C33_PSE_EXT_STATE_POWER_NOT_AVAILABLE,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_POWER_NOT_AVAILABLE_PD_REQUEST_EXCEEDS_PORT_LIMIT},
+	{0x41, ETHTOOL_C33_PSE_EXT_STATE_POWER_NOT_AVAILABLE,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_POWER_NOT_AVAILABLE_HW_PW_LIMIT},
+	{0x43, ETHTOOL_C33_PSE_EXT_STATE_ERROR_CONDITION,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_ERROR_CONDITION_UNKNOWN_PORT_STATUS},
+	{0xA7, ETHTOOL_C33_PSE_EXT_STATE_OPTION_DETECT_TED,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_OPTION_DETECT_TED_CONNECTION_CHECK_ERROR},
+	{0xA8, ETHTOOL_C33_PSE_EXT_STATE_MR_MPS_VALID,
+		ETHTOOL_C33_PSE_EXT_SUBSTATE_MR_MPS_VALID_CONNECTION_OPEN},
+	{ /* sentinel */ }
+};
+
+static int
+pd692x0_pi_get_ext_state(struct pse_controller_dev *pcdev, int id,
+			 struct pse_ext_state_info *ext_state_info)
+{
+	struct ethtool_c33_pse_ext_state_info *c33_ext_state_info;
+	const struct pd692x0_pse_ext_state_mapping *ext_state_map;
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_STATUS];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+
+	c33_ext_state_info = &ext_state_info->c33_ext_state_info;
+	ext_state_map = pd692x0_pse_ext_state_map;
+	while (ext_state_map->status_code) {
+		if (ext_state_map->status_code == buf.sub[0]) {
+			c33_ext_state_info->c33_pse_ext_state = ext_state_map->pse_ext_state;
+			c33_ext_state_info->__c33_pse_ext_substate = ext_state_map->pse_ext_substate;
+			return  0;
+		}
+		ext_state_map++;
+	}
+
+	return 0;
+}
+
+struct pd692x0_class_pw {
+	int class;
+	int class_cfg_value;
+	int class_pw;
+	int max_added_class_pw;
+};
+
+#define PD692X0_CLASS_PW_TABLE_SIZE 4
+/* 4/2 pairs class configuration power table in compliance mode.
+ * Need to be arranged in ascending order of power support.
+ */
+static const struct pd692x0_class_pw
+pd692x0_class_pw_table[PD692X0_CLASS_PW_TABLE_SIZE] = {
+	{.class = 3, .class_cfg_value = 0x3, .class_pw = 15000, .max_added_class_pw = 3100},
+	{.class = 4, .class_cfg_value = 0x2, .class_pw = 30000, .max_added_class_pw = 8000},
+	{.class = 6, .class_cfg_value = 0x1, .class_pw = 60000, .max_added_class_pw = 5000},
+	{.class = 8, .class_cfg_value = 0x0, .class_pw = 90000, .max_added_class_pw = 7500},
+};
+
+static int pd692x0_pi_get_pw_from_table(int op_mode, int added_pw)
+{
+	const struct pd692x0_class_pw *pw_table;
+	int i;
+
+	pw_table = pd692x0_class_pw_table;
+	for (i = 0; i < PD692X0_CLASS_PW_TABLE_SIZE; i++, pw_table++) {
+		if (pw_table->class_cfg_value == op_mode)
+			return pw_table->class_pw + added_pw * 100;
+	}
+
+	return -ERANGE;
+}
+
+static int pd692x0_pi_set_pw_from_table(struct device *dev,
+					struct pd692x0_msg *msg, int pw)
+{
+	const struct pd692x0_class_pw *pw_table;
+	int i;
+
+	pw_table = pd692x0_class_pw_table;
+	if (pw < pw_table->class_pw) {
+		dev_err(dev,
+			"Power limit %dmW not supported. Ranges minimal available: [%d-%d]\n",
+			pw,
+			pw_table->class_pw,
+			pw_table->class_pw + pw_table->max_added_class_pw);
+		return -ERANGE;
+	}
+
+	for (i = 0; i < PD692X0_CLASS_PW_TABLE_SIZE; i++, pw_table++) {
+		if (pw > (pw_table->class_pw + pw_table->max_added_class_pw))
+			continue;
+
+		if (pw < pw_table->class_pw) {
+			dev_err(dev,
+				"Power limit %dmW not supported. Ranges available: [%d-%d] or [%d-%d]\n",
+				pw,
+				(pw_table - 1)->class_pw,
+				(pw_table - 1)->class_pw + (pw_table - 1)->max_added_class_pw,
+				pw_table->class_pw,
+				pw_table->class_pw + pw_table->max_added_class_pw);
+			return -ERANGE;
+		}
+
+		msg->data[2] = pw_table->class_cfg_value;
+		msg->data[3] = (pw - pw_table->class_pw) / 100;
+		return 0;
+	}
+
+	pw_table--;
+	dev_warn(dev,
+		 "Power limit %dmW not supported. Set to highest power limit %dmW\n",
+		 pw, pw_table->class_pw + pw_table->max_added_class_pw);
+	msg->data[2] = pw_table->class_cfg_value;
+	msg->data[3] = pw_table->max_added_class_pw / 100;
+	return 0;
+}
+
+static int
+pd692x0_pi_get_pw_limit_ranges(struct pse_controller_dev *pcdev, int id,
+			       struct pse_pw_limit_ranges *pw_limit_ranges)
+{
+	struct ethtool_c33_pse_pw_limit_range *c33_pw_limit_ranges;
+	const struct pd692x0_class_pw *pw_table;
+	int i;
+
+	pw_table = pd692x0_class_pw_table;
+	c33_pw_limit_ranges = kcalloc(PD692X0_CLASS_PW_TABLE_SIZE,
+				      sizeof(*c33_pw_limit_ranges),
+				      GFP_KERNEL);
+	if (!c33_pw_limit_ranges)
+		return -ENOMEM;
+
+	for (i = 0; i < PD692X0_CLASS_PW_TABLE_SIZE; i++, pw_table++) {
+		c33_pw_limit_ranges[i].min = pw_table->class_pw;
+		c33_pw_limit_ranges[i].max = pw_table->class_pw +
+					     pw_table->max_added_class_pw;
+	}
+
+	pw_limit_ranges->c33_pw_limit_ranges = c33_pw_limit_ranges;
+	return i;
+}
+
+static int
+pd692x0_pi_get_admin_state(struct pse_controller_dev *pcdev, int id,
+			   struct pse_admin_state *admin_state)
 {
 	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
 	struct pd692x0_msg msg, buf = {0};
@@ -426,19 +680,21 @@ static int pd692x0_pi_is_enabled(struct pse_controller_dev *pcdev, int id)
 	if (ret < 0)
 		return ret;
 
-	if (buf.sub[1]) {
-		priv->admin_state[id] = ETHTOOL_C33_PSE_ADMIN_STATE_ENABLED;
-		return 1;
-	} else {
-		priv->admin_state[id] = ETHTOOL_C33_PSE_ADMIN_STATE_DISABLED;
-		return 0;
-	}
+	if (buf.sub[1])
+		admin_state->c33_admin_state =
+			ETHTOOL_C33_PSE_ADMIN_STATE_ENABLED;
+	else
+		admin_state->c33_admin_state =
+			ETHTOOL_C33_PSE_ADMIN_STATE_DISABLED;
+
+	priv->admin_state[id] = admin_state->c33_admin_state;
+
+	return 0;
 }
 
-static int pd692x0_ethtool_get_status(struct pse_controller_dev *pcdev,
-				      unsigned long id,
-				      struct netlink_ext_ack *extack,
-				      struct pse_control_status *status)
+static int
+pd692x0_pi_get_pw_status(struct pse_controller_dev *pcdev, int id,
+			 struct pse_pw_status *pw_status)
 {
 	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
 	struct pd692x0_msg msg, buf = {0};
@@ -456,22 +712,87 @@ static int pd692x0_ethtool_get_status(struct pse_controller_dev *pcdev,
 
 	/* Compare Port Status (Communication Protocol Document par. 7.1) */
 	if ((buf.sub[0] & 0xf0) == 0x80 || (buf.sub[0] & 0xf0) == 0x90)
-		status->c33_pw_status = ETHTOOL_C33_PSE_PW_D_STATUS_DELIVERING;
+		pw_status->c33_pw_status =
+			ETHTOOL_C33_PSE_PW_D_STATUS_DELIVERING;
 	else if (buf.sub[0] == 0x1b || buf.sub[0] == 0x22)
-		status->c33_pw_status = ETHTOOL_C33_PSE_PW_D_STATUS_SEARCHING;
+		pw_status->c33_pw_status =
+			ETHTOOL_C33_PSE_PW_D_STATUS_SEARCHING;
 	else if (buf.sub[0] == 0x12)
-		status->c33_pw_status = ETHTOOL_C33_PSE_PW_D_STATUS_FAULT;
+		pw_status->c33_pw_status =
+			ETHTOOL_C33_PSE_PW_D_STATUS_FAULT;
 	else
-		status->c33_pw_status = ETHTOOL_C33_PSE_PW_D_STATUS_DISABLED;
-
-	if (buf.sub[1])
-		status->c33_admin_state = ETHTOOL_C33_PSE_ADMIN_STATE_ENABLED;
-	else
-		status->c33_admin_state = ETHTOOL_C33_PSE_ADMIN_STATE_DISABLED;
-
-	priv->admin_state[id] = status->c33_admin_state;
+		pw_status->c33_pw_status =
+			ETHTOOL_C33_PSE_PW_D_STATUS_DISABLED;
 
 	return 0;
+}
+
+static int
+pd692x0_pi_get_pw_class(struct pse_controller_dev *pcdev, int id)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	u32 class;
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_CLASS];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+
+	class = buf.data[3] >> 4;
+	if (class <= 8)
+		return class;
+
+	return 0;
+}
+
+static int
+pd692x0_pi_get_actual_pw(struct pse_controller_dev *pcdev, int id)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_STATUS];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+
+	return (buf.data[0] << 4 | buf.data[1]) * 100;
+}
+
+static int
+pd692x0_pi_get_prio(struct pse_controller_dev *pcdev, int id)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_PARAM];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+	if (!buf.data[2] || buf.data[2] > pcdev->pis_prio_max + 1)
+		return -ERANGE;
+
+	/* PSE core priority start at 0 */
+	return buf.data[2] - 1;
 }
 
 static struct pd692x0_msg_ver pd692x0_get_sw_version(struct pd692x0_priv *priv)
@@ -501,12 +822,8 @@ static struct pd692x0_msg_ver pd692x0_get_sw_version(struct pd692x0_priv *priv)
 
 struct pd692x0_manager {
 	struct device_node *port_node[PD692X0_MAX_MANAGER_PORTS];
+	struct device_node *node;
 	int nports;
-};
-
-struct pd692x0_matrix {
-	u8 hw_port_a;
-	u8 hw_port_b;
 };
 
 static int
@@ -555,7 +872,7 @@ out:
 
 static int
 pd692x0_of_get_managers(struct pd692x0_priv *priv,
-			struct pd692x0_manager manager[PD692X0_MAX_MANAGERS])
+			struct pd692x0_manager *manager)
 {
 	struct device_node *managers_node, *node;
 	int ret, nmanagers, i, j;
@@ -592,11 +909,14 @@ pd692x0_of_get_managers(struct pd692x0_priv *priv,
 		if (ret)
 			goto out;
 
+		of_node_get(node);
+		manager[manager_id].node = node;
 		nmanagers++;
 	}
 
 	of_node_put(managers_node);
-	return nmanagers;
+	priv->nmanagers = nmanagers;
+	return 0;
 
 out:
 	for (i = 0; i < nmanagers; i++) {
@@ -604,11 +924,168 @@ out:
 			of_node_put(manager[i].port_node[j]);
 			manager[i].port_node[j] = NULL;
 		}
+		of_node_put(manager[i].node);
+		manager[i].node = NULL;
 	}
 
 	of_node_put(node);
 	of_node_put(managers_node);
 	return ret;
+}
+
+static const struct regulator_ops dummy_ops;
+
+static struct regulator_dev *
+pd692x0_register_manager_regulator(struct device *dev, char *reg_name,
+				   struct device_node *node)
+{
+	struct regulator_init_data *rinit_data;
+	struct regulator_config rconfig = {0};
+	struct regulator_desc *rdesc;
+	struct regulator_dev *rdev;
+
+	rinit_data = devm_kzalloc(dev, sizeof(*rinit_data),
+				  GFP_KERNEL);
+	if (!rinit_data)
+		return ERR_PTR(-ENOMEM);
+
+	rdesc = devm_kzalloc(dev, sizeof(*rdesc), GFP_KERNEL);
+	if (!rdesc)
+		return ERR_PTR(-ENOMEM);
+
+	rdesc->name = reg_name;
+	rdesc->type = REGULATOR_VOLTAGE;
+	rdesc->ops = &dummy_ops;
+	rdesc->owner = THIS_MODULE;
+
+	rinit_data->supply_regulator = "vmain";
+
+	rconfig.dev = dev;
+	rconfig.init_data = rinit_data;
+	rconfig.of_node = node;
+
+	rdev = devm_regulator_register(dev, rdesc, &rconfig);
+	if (IS_ERR(rdev)) {
+		dev_err_probe(dev, PTR_ERR(rdev),
+			      "Failed to register regulator\n");
+		return rdev;
+	}
+
+	return rdev;
+}
+
+static int
+pd692x0_register_managers_regulator(struct pd692x0_priv *priv,
+				    const struct pd692x0_manager *manager)
+{
+	struct device *dev = &priv->client->dev;
+	size_t reg_name_len;
+	int i;
+
+	/* Each regulator name len is dev name + 12 char +
+	 * int max digit number (10) + 1
+	 */
+	reg_name_len = strlen(dev_name(dev)) + 23;
+
+	for (i = 0; i < priv->nmanagers; i++) {
+		static const char * const regulators[] = { "vaux5", "vaux3p3" };
+		struct regulator_dev *rdev;
+		char *reg_name;
+		int ret;
+
+		reg_name = devm_kzalloc(dev, reg_name_len, GFP_KERNEL);
+		if (!reg_name)
+			return -ENOMEM;
+		snprintf(reg_name, 26, "pse-%s-manager%d", dev_name(dev), i);
+		rdev = pd692x0_register_manager_regulator(dev, reg_name,
+							  manager[i].node);
+		if (IS_ERR(rdev))
+			return PTR_ERR(rdev);
+
+		/* VMAIN is described as main supply for the manager.
+		 * Add other VAUX power supplies and link them to the
+		 * virtual device rdev->dev.
+		 */
+		ret = devm_regulator_bulk_get_enable(&rdev->dev,
+						     ARRAY_SIZE(regulators),
+						     regulators);
+		if (ret)
+			return dev_err_probe(&rdev->dev, ret,
+					     "Failed to enable regulators\n");
+
+		priv->manager_reg[i] = rdev;
+	}
+
+	return 0;
+}
+
+static int
+pd692x0_conf_manager_power_budget(struct pd692x0_priv *priv, int id)
+{
+	struct pd692x0_msg msg, buf;
+	int ret, pw_mW;
+
+	pw_mW = priv->manager_pw_budget[id] / 1000;
+	if (!pw_mW)
+		return 0;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_POWER_BANK];
+	msg.data[0] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_SET_POWER_BANK];
+	msg.data[0] = id;
+	msg.data[1] = pw_mW >> 8;
+	msg.data[2] = pw_mW & 0xff;
+	msg.data[3] = buf.sub[2];
+	msg.data[4] = buf.data[0];
+	msg.data[5] = buf.data[1];
+	msg.data[6] = buf.data[2];
+	msg.data[7] = buf.data[3];
+	return pd692x0_sendrecv_msg(priv, &msg, &buf);
+}
+
+static int
+pd692x0_req_managers_pw_budget(struct pd692x0_priv *priv)
+{
+	int i, ret;
+
+	for (i = 0; i < priv->nmanagers; i++) {
+		struct regulator *supply = priv->manager_reg[i]->supply;
+		int pw_budget;
+
+		pw_budget = regulator_get_unclaimed_power_budget(supply);
+		if (!pw_budget)
+			/* Do nothing if no power budget */
+			continue;
+
+		/* Max power budget per manager */
+		if (pw_budget > 6000000)
+			pw_budget = 6000000;
+		ret = regulator_request_power_budget(supply, pw_budget);
+		if (ret < 0)
+			return ret;
+
+		priv->manager_pw_budget[i] = pw_budget;
+	}
+
+	return 0;
+}
+
+static int
+pd692x0_configure_managers(struct pd692x0_priv *priv)
+{
+	int i, ret;
+
+	for (i = 0; i < priv->nmanagers; i++) {
+		ret = pd692x0_conf_manager_power_budget(priv, i);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int
@@ -651,10 +1128,9 @@ pd692x0_set_port_matrix(const struct pse_pi_pairset *pairset,
 
 static int
 pd692x0_set_ports_matrix(struct pd692x0_priv *priv,
-			 const struct pd692x0_manager *manager,
-			 int nmanagers,
-			 struct pd692x0_matrix port_matrix[PD692X0_MAX_PIS])
+			 const struct pd692x0_manager *manager)
 {
+	struct pd692x0_matrix *port_matrix = priv->port_matrix;
 	struct pse_controller_dev *pcdev = &priv->pcdev;
 	int i, ret;
 
@@ -667,7 +1143,7 @@ pd692x0_set_ports_matrix(struct pd692x0_priv *priv,
 	/* Update with values for every PSE PIs */
 	for (i = 0; i < pcdev->nr_lines; i++) {
 		ret = pd692x0_set_port_matrix(&pcdev->pi[i].pairset[0],
-					      manager, nmanagers,
+					      manager, priv->nmanagers,
 					      &port_matrix[i]);
 		if (ret) {
 			dev_err(&priv->client->dev,
@@ -676,7 +1152,7 @@ pd692x0_set_ports_matrix(struct pd692x0_priv *priv,
 		}
 
 		ret = pd692x0_set_port_matrix(&pcdev->pi[i].pairset[1],
-					      manager, nmanagers,
+					      manager, priv->nmanagers,
 					      &port_matrix[i]);
 		if (ret) {
 			dev_err(&priv->client->dev,
@@ -689,9 +1165,9 @@ pd692x0_set_ports_matrix(struct pd692x0_priv *priv,
 }
 
 static int
-pd692x0_write_ports_matrix(struct pd692x0_priv *priv,
-			   const struct pd692x0_matrix port_matrix[PD692X0_MAX_PIS])
+pd692x0_write_ports_matrix(struct pd692x0_priv *priv)
 {
+	struct pd692x0_matrix *port_matrix = priv->port_matrix;
 	struct pd692x0_msg msg, buf;
 	int ret, i;
 
@@ -716,45 +1192,216 @@ pd692x0_write_ports_matrix(struct pd692x0_priv *priv,
 	return 0;
 }
 
-static int pd692x0_setup_pi_matrix(struct pse_controller_dev *pcdev)
+static int pd692x0_hw_conf_init(struct pd692x0_priv *priv)
 {
-	struct pd692x0_manager manager[PD692X0_MAX_MANAGERS] = {0};
-	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
-	struct pd692x0_matrix port_matrix[PD692X0_MAX_PIS];
-	int ret, i, j, nmanagers;
+	int ret;
 
-	/* Should we flash the port matrix */
+	/* Is PD692x0 ready to be configured? */
 	if (priv->fw_state != PD692X0_FW_OK &&
 	    priv->fw_state != PD692X0_FW_COMPLETE)
 		return 0;
 
+	ret = pd692x0_configure_managers(priv);
+	if (ret)
+		return ret;
+
+	ret = pd692x0_write_ports_matrix(priv);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static void pd692x0_of_put_managers(struct pd692x0_priv *priv,
+				    struct pd692x0_manager *manager)
+{
+	int i, j;
+
+	for (i = 0; i < priv->nmanagers; i++) {
+		for (j = 0; j < manager[i].nports; j++)
+			of_node_put(manager[i].port_node[j]);
+		of_node_put(manager[i].node);
+	}
+}
+
+static void pd692x0_managers_free_pw_budget(struct pd692x0_priv *priv)
+{
+	int i;
+
+	for (i = 0; i < PD692X0_MAX_MANAGERS; i++) {
+		struct regulator *supply;
+
+		if (!priv->manager_reg[i] || !priv->manager_pw_budget[i])
+			continue;
+
+		supply = priv->manager_reg[i]->supply;
+		if (!supply)
+			continue;
+
+		regulator_free_power_budget(supply,
+					    priv->manager_pw_budget[i]);
+	}
+}
+
+static int
+pd692x0_save_user_byte(struct pd692x0_priv *priv)
+{
+	struct pd692x0_msg msg, buf;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_SET_USER_BYTE];
+	return pd692x0_sendrecv_msg(priv, &msg, &buf);
+}
+
+static int pd692x0_setup_pi_matrix(struct pse_controller_dev *pcdev)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_matrix *port_matrix;
+	struct pd692x0_manager *manager;
+	int ret;
+
+	manager = kcalloc(PD692X0_MAX_MANAGERS, sizeof(*manager), GFP_KERNEL);
+	if (!manager)
+		return -ENOMEM;
+
+	port_matrix = devm_kcalloc(&priv->client->dev, PD692X0_MAX_PIS,
+				   sizeof(*port_matrix), GFP_KERNEL);
+	if (!port_matrix) {
+		ret = -ENOMEM;
+		goto err_free_manager;
+	}
+	priv->port_matrix = port_matrix;
+
 	ret = pd692x0_of_get_managers(priv, manager);
+	if (ret < 0)
+		goto err_free_manager;
+
+	ret = pd692x0_register_managers_regulator(priv, manager);
+	if (ret)
+		goto err_of_managers;
+
+	ret = pd692x0_req_managers_pw_budget(priv);
+	if (ret)
+		goto err_of_managers;
+
+	ret = pd692x0_set_ports_matrix(priv, manager);
+	if (ret)
+		goto err_managers_req_pw;
+
+	/* Do not init the conf if it is already saved */
+	if (!priv->cfg_saved) {
+		ret = pd692x0_hw_conf_init(priv);
+		if (ret)
+			goto err_managers_req_pw;
+
+		ret = pd692x0_save_user_byte(priv);
+		if (ret)
+			goto err_managers_req_pw;
+	}
+
+	pd692x0_of_put_managers(priv, manager);
+	kfree(manager);
+	return 0;
+
+err_managers_req_pw:
+	pd692x0_managers_free_pw_budget(priv);
+err_of_managers:
+	pd692x0_of_put_managers(priv, manager);
+err_free_manager:
+	kfree(manager);
+	return ret;
+}
+
+static int pd692x0_pi_get_voltage(struct pse_controller_dev *pcdev, int id)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_MEAS];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
 	if (ret < 0)
 		return ret;
 
-	nmanagers = ret;
-	ret = pd692x0_set_ports_matrix(priv, manager, nmanagers, port_matrix);
-	if (ret)
-		goto out;
+	/* Convert 0.1V unit to uV */
+	return (buf.sub[0] << 8 | buf.sub[1]) * 100000;
+}
 
-	ret = pd692x0_write_ports_matrix(priv, port_matrix);
-	if (ret)
-		goto out;
+static int pd692x0_pi_get_pw_limit(struct pse_controller_dev *pcdev,
+				   int id)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
 
-out:
-	for (i = 0; i < nmanagers; i++) {
-		for (j = 0; j < manager[i].nports; j++)
-			of_node_put(manager[i].port_node[j]);
-	}
-	return ret;
+	msg = pd692x0_msg_template_list[PD692X0_MSG_GET_PORT_PARAM];
+	msg.sub[2] = id;
+	ret = pd692x0_sendrecv_msg(priv, &msg, &buf);
+	if (ret < 0)
+		return ret;
+
+	return pd692x0_pi_get_pw_from_table(buf.data[0], buf.data[1]);
+}
+
+static int pd692x0_pi_set_pw_limit(struct pse_controller_dev *pcdev,
+				   int id, int max_mW)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct device *dev = &priv->client->dev;
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_SET_PORT_PARAM];
+	msg.sub[2] = id;
+	ret = pd692x0_pi_set_pw_from_table(dev, &msg, max_mW);
+	if (ret)
+		return ret;
+
+	return pd692x0_sendrecv_msg(priv, &msg, &buf);
+}
+
+static int pd692x0_pi_set_prio(struct pse_controller_dev *pcdev, int id,
+			       unsigned int prio)
+{
+	struct pd692x0_priv *priv = to_pd692x0_priv(pcdev);
+	struct pd692x0_msg msg, buf = {0};
+	int ret;
+
+	ret = pd692x0_fw_unavailable(priv);
+	if (ret)
+		return ret;
+
+	msg = pd692x0_msg_template_list[PD692X0_MSG_SET_PORT_PARAM];
+	msg.sub[2] = id;
+	/* Controller priority from 1 to 3 */
+	msg.data[4] = prio + 1;
+
+	return pd692x0_sendrecv_msg(priv, &msg, &buf);
 }
 
 static const struct pse_controller_ops pd692x0_ops = {
 	.setup_pi_matrix = pd692x0_setup_pi_matrix,
-	.ethtool_get_status = pd692x0_ethtool_get_status,
+	.pi_get_admin_state = pd692x0_pi_get_admin_state,
+	.pi_get_pw_status = pd692x0_pi_get_pw_status,
+	.pi_get_ext_state = pd692x0_pi_get_ext_state,
+	.pi_get_pw_class = pd692x0_pi_get_pw_class,
+	.pi_get_actual_pw = pd692x0_pi_get_actual_pw,
 	.pi_enable = pd692x0_pi_enable,
 	.pi_disable = pd692x0_pi_disable,
-	.pi_is_enabled = pd692x0_pi_is_enabled,
+	.pi_get_voltage = pd692x0_pi_get_voltage,
+	.pi_get_pw_limit = pd692x0_pi_get_pw_limit,
+	.pi_set_pw_limit = pd692x0_pi_set_pw_limit,
+	.pi_get_pw_limit_ranges = pd692x0_pi_get_pw_limit_ranges,
+	.pi_get_prio = pd692x0_pi_get_prio,
+	.pi_set_prio = pd692x0_pi_set_prio,
 };
 
 #define PD692X0_FW_LINE_MAX_SZ 0xff
@@ -1063,7 +1710,7 @@ static enum fw_upload_err pd692x0_fw_poll_complete(struct fw_upload *fwl)
 		return FW_UPLOAD_ERR_FW_INVALID;
 	}
 
-	ret = pd692x0_setup_pi_matrix(&priv->pcdev);
+	ret = pd692x0_hw_conf_init(priv);
 	if (ret < 0) {
 		dev_err(&client->dev, "Error configuring ports matrix (%pe)\n",
 			ERR_PTR(ret));
@@ -1108,12 +1755,19 @@ static const struct fw_upload_ops pd692x0_fw_ops = {
 
 static int pd692x0_i2c_probe(struct i2c_client *client)
 {
+	static const char * const regulators[] = { "vdd", "vdda" };
 	struct pd692x0_msg msg, buf = {0}, zero = {0};
 	struct device *dev = &client->dev;
 	struct pd692x0_msg_ver ver;
 	struct pd692x0_priv *priv;
 	struct fw_upload *fwl;
 	int ret;
+
+	ret = devm_regulator_bulk_get_enable(dev, ARRAY_SIZE(regulators),
+					     regulators);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "Failed to enable regulators\n");
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		dev_err(dev, "i2c check functionality failed\n");
@@ -1165,12 +1819,17 @@ static int pd692x0_i2c_probe(struct i2c_client *client)
 		}
 	}
 
+	if (buf.data[2] == PD692X0_USER_BYTE)
+		priv->cfg_saved = true;
+
 	priv->np = dev->of_node;
 	priv->pcdev.nr_lines = PD692X0_MAX_PIS;
 	priv->pcdev.owner = THIS_MODULE;
 	priv->pcdev.ops = &pd692x0_ops;
 	priv->pcdev.dev = dev;
 	priv->pcdev.types = ETHTOOL_PSE_C33;
+	priv->pcdev.supp_budget_eval_strategies = PSE_BUDGET_EVAL_STRAT_DYNAMIC;
+	priv->pcdev.pis_prio_max = 2;
 	ret = devm_pse_controller_register(dev, &priv->pcdev);
 	if (ret)
 		return dev_err_probe(dev, ret,
@@ -1190,12 +1849,13 @@ static void pd692x0_i2c_remove(struct i2c_client *client)
 {
 	struct pd692x0_priv *priv = i2c_get_clientdata(client);
 
+	pd692x0_managers_free_pw_budget(priv);
 	firmware_upload_unregister(priv->fwl);
 }
 
 static const struct i2c_device_id pd692x0_id[] = {
-	{ PD692X0_PSE_NAME, 0 },
-	{ },
+	{ PD692X0_PSE_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pd692x0_id);
 

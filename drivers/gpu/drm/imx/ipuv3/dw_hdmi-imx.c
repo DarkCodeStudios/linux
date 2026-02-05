@@ -265,7 +265,7 @@ static void dw_hdmi_imx_remove(struct platform_device *pdev)
 
 static struct platform_driver dw_hdmi_imx_platform_driver = {
 	.probe  = dw_hdmi_imx_probe,
-	.remove_new = dw_hdmi_imx_remove,
+	.remove = dw_hdmi_imx_remove,
 	.driver = {
 		.name = "dwhdmi-imx",
 		.of_match_table = dw_hdmi_imx_dt_ids,
@@ -278,4 +278,3 @@ MODULE_AUTHOR("Andy Yan <andy.yan@rock-chips.com>");
 MODULE_AUTHOR("Yakir Yang <ykk@rock-chips.com>");
 MODULE_DESCRIPTION("IMX6 Specific DW-HDMI Driver Extension");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:dwhdmi-imx");

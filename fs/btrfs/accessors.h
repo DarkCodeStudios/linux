@@ -3,7 +3,7 @@
 #ifndef BTRFS_ACCESSORS_H
 #define BTRFS_ACCESSORS_H
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
 #include <linux/align.h>
@@ -12,16 +12,10 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <uapi/linux/btrfs_tree.h>
+#include "fs.h"
+#include "extent_io.h"
 
 struct extent_buffer;
-
-struct btrfs_map_token {
-	struct extent_buffer *eb;
-	char *kaddr;
-	unsigned long offset;
-};
-
-void btrfs_init_map_token(struct btrfs_map_token *token, struct extent_buffer *eb);
 
 /*
  * Some macros to generate set/get functions for the struct fields.  This
@@ -34,7 +28,7 @@ void btrfs_init_map_token(struct btrfs_map_token *token, struct extent_buffer *e
 
 static inline u8 get_unaligned_le8(const void *p)
 {
-       return *(u8 *)p;
+       return *(const u8 *)p;
 }
 
 static inline void put_unaligned_le8(u8 val, void *p)
@@ -48,18 +42,13 @@ static inline void put_unaligned_le8(u8 val, void *p)
 			    offsetof(type, member),			\
 			    sizeof_field(type, member)))
 
-#define write_eb_member(eb, ptr, type, member, result) (\
-	write_extent_buffer(eb, (char *)(result),			\
+#define write_eb_member(eb, ptr, type, member, source) (		\
+	write_extent_buffer(eb, (const char *)(source),			\
 			   ((unsigned long)(ptr)) +			\
 			    offsetof(type, member),			\
 			    sizeof_field(type, member)))
 
 #define DECLARE_BTRFS_SETGET_BITS(bits)					\
-u##bits btrfs_get_token_##bits(struct btrfs_map_token *token,		\
-			       const void *ptr, unsigned long off);	\
-void btrfs_set_token_##bits(struct btrfs_map_token *token,		\
-			    const void *ptr, unsigned long off,		\
-			    u##bits val);				\
 u##bits btrfs_get_##bits(const struct extent_buffer *eb,		\
 			 const void *ptr, unsigned long off);		\
 void btrfs_set_##bits(const struct extent_buffer *eb, void *ptr,	\
@@ -82,18 +71,6 @@ static inline void btrfs_set_##name(const struct extent_buffer *eb, type *s, \
 {									\
 	static_assert(sizeof(u##bits) == sizeof_field(type, member));	\
 	btrfs_set_##bits(eb, s, offsetof(type, member), val);		\
-}									\
-static inline u##bits btrfs_token_##name(struct btrfs_map_token *token,	\
-					 const type *s)			\
-{									\
-	static_assert(sizeof(u##bits) == sizeof_field(type, member));	\
-	return btrfs_get_token_##bits(token, s, offsetof(type, member));\
-}									\
-static inline void btrfs_set_token_##name(struct btrfs_map_token *token,\
-					  type *s, u##bits val)		\
-{									\
-	static_assert(sizeof(u##bits) == sizeof_field(type, member));	\
-	btrfs_set_token_##bits(token, s, offsetof(type, member), val);	\
 }
 
 #define BTRFS_SETGET_HEADER_FUNCS(name, type, member, bits)		\
@@ -315,11 +292,8 @@ BTRFS_SETGET_FUNCS(timespec_nsec, struct btrfs_timespec, nsec, 32);
 BTRFS_SETGET_STACK_FUNCS(stack_timespec_sec, struct btrfs_timespec, sec, 64);
 BTRFS_SETGET_STACK_FUNCS(stack_timespec_nsec, struct btrfs_timespec, nsec, 32);
 
-BTRFS_SETGET_FUNCS(stripe_extent_encoding, struct btrfs_stripe_extent, encoding, 8);
 BTRFS_SETGET_FUNCS(raid_stride_devid, struct btrfs_raid_stride, devid, 64);
 BTRFS_SETGET_FUNCS(raid_stride_physical, struct btrfs_raid_stride, physical, 64);
-BTRFS_SETGET_STACK_FUNCS(stack_stripe_extent_encoding,
-			 struct btrfs_stripe_extent, encoding, 8);
 BTRFS_SETGET_STACK_FUNCS(stack_raid_stride_devid, struct btrfs_raid_stride, devid, 64);
 BTRFS_SETGET_STACK_FUNCS(stack_raid_stride_physical, struct btrfs_raid_stride, physical, 64);
 
@@ -353,7 +327,7 @@ static inline void btrfs_tree_block_key(const struct extent_buffer *eb,
 
 static inline void btrfs_set_tree_block_key(const struct extent_buffer *eb,
 					    struct btrfs_tree_block_info *item,
-					    struct btrfs_disk_key *key)
+					    const struct btrfs_disk_key *key)
 {
 	write_eb_member(eb, item, struct btrfs_tree_block_info, key, key);
 }
@@ -446,7 +420,7 @@ void btrfs_node_key(const struct extent_buffer *eb,
 		    struct btrfs_disk_key *disk_key, int nr);
 
 static inline void btrfs_set_node_key(const struct extent_buffer *eb,
-				      struct btrfs_disk_key *disk_key, int nr)
+				      const struct btrfs_disk_key *disk_key, int nr)
 {
 	unsigned long ptr;
 
@@ -481,18 +455,6 @@ static inline void btrfs_set_item_##member(const struct extent_buffer *eb,	\
 					   int slot, u32 val)			\
 {										\
 	btrfs_set_raw_item_##member(eb, btrfs_item_nr(eb, slot), val);		\
-}										\
-static inline u32 btrfs_token_item_##member(struct btrfs_map_token *token,	\
-					    int slot)				\
-{										\
-	struct btrfs_item *item = btrfs_item_nr(token->eb, slot);		\
-	return btrfs_token_raw_item_##member(token, item);			\
-}										\
-static inline void btrfs_set_token_item_##member(struct btrfs_map_token *token,	\
-						 int slot, u32 val)		\
-{										\
-	struct btrfs_item *item = btrfs_item_nr(token->eb, slot);		\
-	btrfs_set_token_raw_item_##member(token, item, val);			\
 }
 
 BTRFS_ITEM_SETGET_FUNCS(offset)
@@ -512,7 +474,7 @@ static inline void btrfs_item_key(const struct extent_buffer *eb,
 }
 
 static inline void btrfs_set_item_key(struct extent_buffer *eb,
-				      struct btrfs_disk_key *disk_key, int nr)
+				      const struct btrfs_disk_key *disk_key, int nr)
 {
 	struct btrfs_item *item = btrfs_item_nr(eb, nr);
 

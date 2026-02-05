@@ -48,6 +48,7 @@
 #include <linux/sunrpc/rpc_rdma.h>
 #include <linux/sunrpc/rpc_rdma_cid.h>
 #include <linux/sunrpc/svc_rdma_pcl.h>
+#include <linux/sunrpc/rdma_rn.h>
 
 #include <linux/percpu_counter.h>
 #include <rdma/ib_verbs.h>
@@ -76,6 +77,7 @@ struct svcxprt_rdma {
 	struct svc_xprt      sc_xprt;		/* SVC transport structure */
 	struct rdma_cm_id    *sc_cm_id;		/* RDMA connection id */
 	struct list_head     sc_accept_q;	/* Conn. waiting accept */
+	struct rpcrdma_notification sc_rn;	/* removal notification */
 	int		     sc_ord;		/* RDMA read limit */
 	int                  sc_max_send_sges;
 	bool		     sc_snd_w_inv;	/* OK to use Send With Invalidate */
@@ -129,7 +131,7 @@ static inline struct svcxprt_rdma *svc_rdma_rqst_rdma(struct svc_rqst *rqstp)
  */
 enum {
 	RPCRDMA_LISTEN_BACKLOG	= 10,
-	RPCRDMA_MAX_REQUESTS	= 64,
+	RPCRDMA_MAX_REQUESTS	= 128,
 	RPCRDMA_MAX_BC_REQUESTS	= 2,
 };
 
@@ -200,7 +202,8 @@ struct svc_rdma_recv_ctxt {
 	struct svc_rdma_pcl	rc_reply_pcl;
 
 	unsigned int		rc_page_count;
-	struct page		*rc_pages[RPCSVC_MAXPAGES];
+	unsigned long		rc_maxpages;
+	struct page		*rc_pages[] __counted_by(rc_maxpages);
 };
 
 /*
@@ -242,7 +245,8 @@ struct svc_rdma_send_ctxt {
 	void			*sc_xprt_buf;
 	int			sc_page_count;
 	int			sc_cur_sge_no;
-	struct page		*sc_pages[RPCSVC_MAXPAGES];
+	unsigned long		sc_maxpages;
+	struct page		**sc_pages;
 	struct ib_sge		sc_sges[];
 };
 

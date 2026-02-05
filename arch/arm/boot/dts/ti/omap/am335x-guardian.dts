@@ -14,7 +14,7 @@
 	compatible = "bosch,am335x-guardian", "ti,am33xx";
 
 	chosen {
-		stdout-path = &uart0;
+		stdout-path = "serial0:115200n8";
 		tick-timer = &timer2;
 	};
 
@@ -74,7 +74,7 @@
 		pinctrl-1 = <&lcd_pins_sleep>;
 
 		display-timings {
-			320x240 {
+			timing-320x240 {
 				hactive         = <320>;
 				vactive         = <240>;
 				hback-porch     = <68>;

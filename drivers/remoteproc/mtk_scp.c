@@ -16,6 +16,7 @@
 #include <linux/remoteproc.h>
 #include <linux/remoteproc/mtk_scp.h>
 #include <linux/rpmsg/mtk_rpmsg.h>
+#include <linux/string.h>
 
 #include "mtk_common.h"
 #include "remoteproc_internal.h"
@@ -117,8 +118,8 @@ static void scp_ipi_handler(struct mtk_scp *scp)
 		return;
 	}
 
-	memset(scp->share_buf, 0, scp_sizes->ipi_share_buffer_size);
 	memcpy_fromio(scp->share_buf, &rcv_obj->share_buf, len);
+	memset(&scp->share_buf[len], 0, scp_sizes->ipi_share_buffer_size - len);
 	handler(scp->share_buf, len, ipi_desc[id].priv);
 	scp_ipi_unlock(scp, id);
 
@@ -1093,22 +1094,74 @@ static void scp_remove_rpmsg_subdev(struct mtk_scp *scp)
 	}
 }
 
+/**
+ * scp_get_default_fw_path() - Get default SCP firmware path
+ * @dev:     SCP Device
+ * @core_id: SCP Core number
+ *
+ * This function generates a path based on the following format:
+ *     mediatek/(soc_model)/scp(_cX).img; for multi-core or
+ *     mediatek/(soc_model)/scp.img for single core SCP HW
+ *
+ * Return: A devm allocated string containing the full path to
+ *         a SCP firmware or an error pointer
+ */
+static const char *scp_get_default_fw_path(struct device *dev, int core_id)
+{
+	struct device_node *np = core_id < 0 ? dev->of_node : dev->parent->of_node;
+	const char *compatible, *soc;
+	char scp_fw_file[7];
+	int ret;
+
+	/* Use only the first compatible string */
+	ret = of_property_read_string_index(np, "compatible", 0, &compatible);
+	if (ret)
+		return ERR_PTR(ret);
+
+	/* If the compatible string's length is implausible bail out early */
+	if (strlen(compatible) < strlen("mediatek,mtXXXX-scp"))
+		return ERR_PTR(-EINVAL);
+
+	/* If the compatible string starts with "mediatek,mt" assume that it's ok */
+	if (!str_has_prefix(compatible, "mediatek,mt"))
+		return ERR_PTR(-EINVAL);
+
+	if (core_id >= 0)
+		ret = snprintf(scp_fw_file, sizeof(scp_fw_file), "scp_c%d", core_id);
+	else
+		ret = snprintf(scp_fw_file, sizeof(scp_fw_file), "scp");
+	if (ret >= sizeof(scp_fw_file))
+		return ERR_PTR(-ENAMETOOLONG);
+
+	/* Not using strchr here, as strlen of a const gets optimized by compiler */
+	soc = &compatible[strlen("mediatek,")];
+
+	return devm_kasprintf(dev, GFP_KERNEL, "mediatek/%.*s/%s.img",
+			      (int)strlen("mtXXXX"), soc, scp_fw_file);
+}
+
 static struct mtk_scp *scp_rproc_init(struct platform_device *pdev,
 				      struct mtk_scp_of_cluster *scp_cluster,
-				      const struct mtk_scp_of_data *of_data)
+				      const struct mtk_scp_of_data *of_data,
+				      int core_id)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct mtk_scp *scp;
 	struct rproc *rproc;
 	struct resource *res;
-	const char *fw_name = "scp.img";
+	const char *fw_name;
 	int ret, i;
 	const struct mtk_scp_sizes_data *scp_sizes;
 
 	ret = rproc_of_parse_firmware(dev, 0, &fw_name);
-	if (ret < 0 && ret != -EINVAL)
-		return ERR_PTR(ret);
+	if (ret) {
+		fw_name = scp_get_default_fw_path(dev, core_id);
+		if (IS_ERR(fw_name)) {
+			dev_err(dev, "Cannot get firmware path: %ld\n", PTR_ERR(fw_name));
+			return ERR_CAST(fw_name);
+		}
+	}
 
 	rproc = devm_rproc_alloc(dev, np->name, &scp_ops, fw_name, sizeof(*scp));
 	if (!rproc) {
@@ -1212,7 +1265,7 @@ static int scp_add_single_core(struct platform_device *pdev,
 	struct mtk_scp *scp;
 	int ret;
 
-	scp = scp_rproc_init(pdev, scp_cluster, of_device_get_match_data(dev));
+	scp = scp_rproc_init(pdev, scp_cluster, of_device_get_match_data(dev), -1);
 	if (IS_ERR(scp))
 		return PTR_ERR(scp);
 
@@ -1259,7 +1312,7 @@ static int scp_add_multi_core(struct platform_device *pdev,
 			goto init_fail;
 		}
 
-		scp = scp_rproc_init(cpdev, scp_cluster, cluster_of_data[core_id]);
+		scp = scp_rproc_init(cpdev, scp_cluster, cluster_of_data[core_id], core_id);
 		put_device(&cpdev->dev);
 		if (IS_ERR(scp)) {
 			ret = PTR_ERR(scp);
@@ -1326,6 +1379,11 @@ static int scp_cluster_init(struct platform_device *pdev, struct mtk_scp_of_clus
 	return ret;
 }
 
+static const struct of_device_id scp_core_match[] = {
+	{ .compatible = "mediatek,scp-core" },
+	{}
+};
+
 static int scp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1344,14 +1402,12 @@ static int scp_probe(struct platform_device *pdev)
 
 	/* l1tcm is an optional memory region */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "l1tcm");
-	scp_cluster->l1tcm_base = devm_ioremap_resource(dev, res);
-	if (IS_ERR(scp_cluster->l1tcm_base)) {
-		ret = PTR_ERR(scp_cluster->l1tcm_base);
-		if (ret != -EINVAL)
-			return dev_err_probe(dev, ret, "Failed to map l1tcm memory\n");
+	if (res) {
+		scp_cluster->l1tcm_base = devm_ioremap_resource(dev, res);
+		if (IS_ERR(scp_cluster->l1tcm_base))
+			return dev_err_probe(dev, PTR_ERR(scp_cluster->l1tcm_base),
+					     "Failed to map l1tcm memory\n");
 
-		scp_cluster->l1tcm_base = NULL;
-	} else {
 		scp_cluster->l1tcm_size = resource_size(res);
 		scp_cluster->l1tcm_phys = res->start;
 	}
@@ -1359,13 +1415,15 @@ static int scp_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&scp_cluster->mtk_scp_list);
 	mutex_init(&scp_cluster->cluster_lock);
 
-	ret = devm_of_platform_populate(dev);
+	ret = of_platform_populate(dev_of_node(dev), scp_core_match, NULL, dev);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to populate platform devices\n");
 
 	ret = scp_cluster_init(pdev, scp_cluster);
-	if (ret)
+	if (ret) {
+		of_platform_depopulate(dev);
 		return ret;
+	}
 
 	return 0;
 }
@@ -1381,6 +1439,7 @@ static void scp_remove(struct platform_device *pdev)
 		rproc_del(scp->rproc);
 		scp_free(scp);
 	}
+	of_platform_depopulate(&pdev->dev);
 	mutex_destroy(&scp_cluster->cluster_lock);
 }
 
@@ -1390,13 +1449,18 @@ static const struct mtk_scp_sizes_data default_scp_sizes = {
 };
 
 static const struct mtk_scp_sizes_data mt8188_scp_sizes = {
-	.max_dram_size = 0x500000,
+	.max_dram_size = 0x800000,
 	.ipi_share_buffer_size = 600,
 };
 
 static const struct mtk_scp_sizes_data mt8188_scp_c1_sizes = {
 	.max_dram_size = 0xA00000,
 	.ipi_share_buffer_size = 600,
+};
+
+static const struct mtk_scp_sizes_data mt8195_scp_sizes = {
+	.max_dram_size = 0x800000,
+	.ipi_share_buffer_size = 288,
 };
 
 static const struct mtk_scp_of_data mt8183_of_data = {
@@ -1476,7 +1540,7 @@ static const struct mtk_scp_of_data mt8195_of_data = {
 	.scp_da_to_va = mt8192_scp_da_to_va,
 	.host_to_scp_reg = MT8192_GIPC_IN_SET,
 	.host_to_scp_int_bit = MT8192_HOST_IPC_INT_BIT,
-	.scp_sizes = &default_scp_sizes,
+	.scp_sizes = &mt8195_scp_sizes,
 };
 
 static const struct mtk_scp_of_data mt8195_of_data_c1 = {
@@ -1518,7 +1582,7 @@ MODULE_DEVICE_TABLE(of, mtk_scp_of_match);
 
 static struct platform_driver mtk_scp_driver = {
 	.probe = scp_probe,
-	.remove_new = scp_remove,
+	.remove = scp_remove,
 	.driver = {
 		.name = "mtk-scp",
 		.of_match_table = mtk_scp_of_match,

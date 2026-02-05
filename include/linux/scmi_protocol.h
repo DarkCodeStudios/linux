@@ -153,7 +153,7 @@ struct scmi_perf_domain_info {
  *	for a given device
  * @fast_switch_rate_limit: gets the minimum time (us) required between
  *	successive fast_switching requests
- * @power_scale_mw_get: indicates if the power values provided are in milliWatts
+ * @power_scale_get: indicates if the power values provided are in milliWatts
  *	or in some other (abstract) scale
  */
 struct scmi_perf_proto_ops {
@@ -945,7 +945,7 @@ struct scmi_device {
 	struct scmi_handle *handle;
 };
 
-#define to_scmi_dev(d) container_of(d, struct scmi_device, dev)
+#define to_scmi_dev(d) container_of_const(d, struct scmi_device, dev)
 
 struct scmi_device_id {
 	u8 protocol_id;

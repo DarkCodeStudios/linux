@@ -9,7 +9,7 @@
 #include <linux/memblock.h>
 #include <linux/random.h>
 #include <asm/dmi.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #ifndef SMBIOS_ENTRY_POINT_SCAN_START
 #define SMBIOS_ENTRY_POINT_SCAN_START 0xF0000
@@ -761,8 +761,8 @@ static void __init dmi_scan_machine(void)
 	pr_info("DMI not present or invalid.\n");
 }
 
-static BIN_ATTR_SIMPLE_ADMIN_RO(smbios_entry_point);
-static BIN_ATTR_SIMPLE_ADMIN_RO(DMI);
+static __ro_after_init BIN_ATTR_SIMPLE_ADMIN_RO(smbios_entry_point);
+static __ro_after_init BIN_ATTR_SIMPLE_ADMIN_RO(DMI);
 
 static int __init dmi_init(void)
 {

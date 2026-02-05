@@ -127,18 +127,26 @@ void rt6_age_exceptions(struct fib6_info *f6i, struct fib6_gc_args *gc_args,
 
 static inline int ip6_route_get_saddr(struct net *net, struct fib6_info *f6i,
 				      const struct in6_addr *daddr,
-				      unsigned int prefs,
+				      unsigned int prefs, int l3mdev_index,
 				      struct in6_addr *saddr)
 {
+	struct net_device *l3mdev;
+	struct net_device *dev;
+	bool same_vrf;
 	int err = 0;
 
-	if (f6i && f6i->fib6_prefsrc.plen) {
-		*saddr = f6i->fib6_prefsrc.addr;
-	} else {
-		struct net_device *dev = f6i ? fib6_info_nh_dev(f6i) : NULL;
+	rcu_read_lock();
 
-		err = ipv6_dev_get_saddr(net, dev, daddr, prefs, saddr);
-	}
+	l3mdev = dev_get_by_index_rcu(net, l3mdev_index);
+	if (!f6i || !f6i->fib6_prefsrc.plen || l3mdev)
+		dev = f6i ? fib6_info_nh_dev(f6i) : NULL;
+	same_vrf = !l3mdev || l3mdev_master_dev_rcu(dev) == l3mdev;
+	if (f6i && f6i->fib6_prefsrc.plen && same_vrf)
+		*saddr = f6i->fib6_prefsrc.addr;
+	else
+		err = ipv6_dev_get_saddr(net, same_vrf ? dev : l3mdev, daddr, prefs, saddr);
+
+	rcu_read_unlock();
 
 	return err;
 }
@@ -221,16 +229,16 @@ static inline const struct rt6_info *skb_rt6_info(const struct sk_buff *skb)
  *	Store a destination cache entry in a socket
  */
 static inline void ip6_dst_store(struct sock *sk, struct dst_entry *dst,
-				 const struct in6_addr *daddr,
-				 const struct in6_addr *saddr)
+				 bool daddr_set,
+				 bool saddr_set)
 {
 	struct ipv6_pinfo *np = inet6_sk(sk);
 
 	np->dst_cookie = rt6_get_cookie(dst_rt6_info(dst));
 	sk_setup_caps(sk, dst);
-	np->daddr_cache = daddr;
+	np->daddr_cache = daddr_set;
 #ifdef CONFIG_IPV6_SUBTREES
-	np->saddr_cache = saddr;
+	np->saddr_cache = saddr_set;
 #endif
 }
 
@@ -266,7 +274,7 @@ static inline unsigned int ip6_skb_dst_mtu(const struct sk_buff *skb)
 	unsigned int mtu;
 
 	if (np && READ_ONCE(np->pmtudisc) >= IPV6_PMTUDISC_PROBE) {
-		mtu = READ_ONCE(dst->dev->mtu);
+		mtu = READ_ONCE(dst_dev(dst)->mtu);
 		mtu -= lwtunnel_headroom(dst->lwtstate, mtu);
 	} else {
 		mtu = dst_mtu(dst);
@@ -329,7 +337,7 @@ static inline unsigned int ip6_dst_mtu_maybe_forward(const struct dst_entry *dst
 
 	mtu = IPV6_MIN_MTU;
 	rcu_read_lock();
-	idev = __in6_dev_get(dst->dev);
+	idev = __in6_dev_get(dst_dev_rcu(dst));
 	if (idev)
 		mtu = READ_ONCE(idev->cnf.mtu6);
 	rcu_read_unlock();

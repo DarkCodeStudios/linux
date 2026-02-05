@@ -5,17 +5,6 @@
  * Copyright (c) 2010-2017 Intel Corporation. All Rights Reserved.
  *
  * Copyright (c) 2010 Silicon Hive www.siliconhive.com.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- *
  */
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -40,7 +29,6 @@
 #include "atomisp_internal.h"
 #include "atomisp-regs.h"
 #include "atomisp_dfs_tables.h"
-#include "atomisp_drvfs.h"
 #include "hmm/hmm.h"
 #include "atomisp_trace_event.h"
 
@@ -55,7 +43,7 @@
 /* G-Min addition: pull this in from intel_mid_pm.h */
 #define CSTATE_EXIT_LATENCY_C1  1
 
-/* cross componnet debug message flag */
+/* cross component debug message flag */
 int dbg_level;
 module_param(dbg_level, int, 0644);
 MODULE_PARM_DESC(dbg_level, "debug message level (default:0)");
@@ -65,14 +53,6 @@ int dbg_func = 1;
 module_param(dbg_func, int, 0644);
 MODULE_PARM_DESC(dbg_func,
 		 "log function switch non/printk (default:printk)");
-
-int mipicsi_flag;
-module_param(mipicsi_flag, int, 0644);
-MODULE_PARM_DESC(mipicsi_flag, "mipi csi compression predictor algorithm");
-
-static char firmware_name[256];
-module_param_string(firmware_name, firmware_name, sizeof(firmware_name), 0);
-MODULE_PARM_DESC(firmware_name, "Firmware file name. Allows overriding the default firmware name.");
 
 /*
  * Set to 16x16 since this is the amount of lines and pixels the sensor
@@ -914,24 +894,25 @@ static void atomisp_init_sensor(struct atomisp_input_subdev *input)
 	 * it emulates a normal v4l2 device there, passing through try_fmt /
 	 * set_fmt to the sensor.
 	 */
-	try_sd_state = __v4l2_subdev_state_alloc(input->camera,
-				"atomisp:try_sd_state->lock", &try_sd_state_key);
+	try_sd_state = __v4l2_subdev_state_alloc(input->sensor,
+						 "atomisp:try_sd_state->lock",
+						 &try_sd_state_key);
 	if (IS_ERR(try_sd_state))
 		return;
 
 	input->try_sd_state = try_sd_state;
 
-	act_sd_state = v4l2_subdev_lock_and_get_active_state(input->camera);
+	act_sd_state = v4l2_subdev_lock_and_get_active_state(input->sensor);
 
 	mbus_code_enum.which = V4L2_SUBDEV_FORMAT_ACTIVE;
-	err = v4l2_subdev_call(input->camera, pad, enum_mbus_code,
+	err = v4l2_subdev_call(input->sensor, pad, enum_mbus_code,
 			       act_sd_state, &mbus_code_enum);
 	if (!err)
 		input->code = mbus_code_enum.code;
 
 	sel.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 	sel.target = V4L2_SEL_TGT_NATIVE_SIZE;
-	err = v4l2_subdev_call(input->camera, pad, get_selection,
+	err = v4l2_subdev_call(input->sensor, pad, get_selection,
 			       act_sd_state, &sel);
 	if (err)
 		goto unlock_act_sd_state;
@@ -940,7 +921,7 @@ static void atomisp_init_sensor(struct atomisp_input_subdev *input)
 
 	sel.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 	sel.target = V4L2_SEL_TGT_CROP_DEFAULT;
-	err = v4l2_subdev_call(input->camera, pad, get_selection,
+	err = v4l2_subdev_call(input->sensor, pad, get_selection,
 			       act_sd_state, &sel);
 	if (err)
 		goto unlock_act_sd_state;
@@ -958,7 +939,7 @@ static void atomisp_init_sensor(struct atomisp_input_subdev *input)
 		fse.code = input->code;
 		fse.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 
-		err = v4l2_subdev_call(input->camera, pad, enum_frame_size,
+		err = v4l2_subdev_call(input->sensor, pad, enum_frame_size,
 				       act_sd_state, &fse);
 		if (err)
 			break;
@@ -981,22 +962,29 @@ static void atomisp_init_sensor(struct atomisp_input_subdev *input)
 	sel.which = V4L2_SUBDEV_FORMAT_TRY;
 	sel.target = V4L2_SEL_TGT_CROP;
 	sel.r = input->native_rect;
-	v4l2_subdev_lock_state(input->try_sd_state);
-	err = v4l2_subdev_call(input->camera, pad, set_selection,
+
+	/* Don't lock try_sd_state if the lock is shared with the active state */
+	if (!input->sensor->state_lock)
+		v4l2_subdev_lock_state(input->try_sd_state);
+
+	err = v4l2_subdev_call(input->sensor, pad, set_selection,
 			       input->try_sd_state, &sel);
-	v4l2_subdev_unlock_state(input->try_sd_state);
+
+	if (!input->sensor->state_lock)
+		v4l2_subdev_unlock_state(input->try_sd_state);
+
 	if (err)
 		goto unlock_act_sd_state;
 
 	sel.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 	sel.target = V4L2_SEL_TGT_CROP;
 	sel.r = input->native_rect;
-	err = v4l2_subdev_call(input->camera, pad, set_selection,
+	err = v4l2_subdev_call(input->sensor, pad, set_selection,
 			       act_sd_state, &sel);
 	if (err)
 		goto unlock_act_sd_state;
 
-	dev_info(input->camera->dev, "Supports crop native %dx%d active %dx%d binning %d\n",
+	dev_info(input->sensor->dev, "Supports crop native %dx%d active %dx%d binning %d\n",
 		 input->native_rect.width, input->native_rect.height,
 		 input->active_rect.width, input->active_rect.height,
 		 input->binning_support);
@@ -1010,8 +998,9 @@ unlock_act_sd_state:
 
 int atomisp_register_device_nodes(struct atomisp_device *isp)
 {
+	struct media_pad *sensor_isp_sink, *sensor_src;
 	struct atomisp_input_subdev *input;
-	int i, err;
+	int i, err, source_pad;
 
 	for (i = 0; i < ATOMISP_CAMERA_NR_PORTS; i++) {
 		err = media_create_pad_link(&isp->csi2_port[i].subdev.entity,
@@ -1026,12 +1015,33 @@ int atomisp_register_device_nodes(struct atomisp_device *isp)
 		input = &isp->inputs[isp->input_cnt];
 
 		input->port = i;
-		input->camera = isp->sensor_subdevs[i];
 		input->csi_port = &isp->csi2_port[i].subdev;
+		input->csi_remote_source = isp->sensor_subdevs[i];
+
+		/*
+		 * Special case for sensors with a ISP in the sensor modelled
+		 * as a separate v4l2-subdev, like the mt9m114.
+		 */
+		if (isp->sensor_subdevs[i]->entity.function == MEDIA_ENT_F_PROC_VIDEO_ISP) {
+			input->sensor_isp = isp->sensor_subdevs[i];
+			source_pad = SENSOR_ISP_PAD_SOURCE;
+
+			sensor_isp_sink = &input->sensor_isp->entity.pads[SENSOR_ISP_PAD_SINK];
+			sensor_src = media_pad_remote_pad_first(sensor_isp_sink);
+			if (!sensor_src) {
+				dev_err(isp->dev, "Error could not find remote pad for sensor ISP sink\n");
+				return -ENOENT;
+			}
+
+			input->sensor = media_entity_to_v4l2_subdev(sensor_src->entity);
+		} else {
+			input->sensor = isp->sensor_subdevs[i];
+			source_pad = 0;
+		}
 
 		atomisp_init_sensor(input);
 
-		err = media_create_pad_link(&input->camera->entity, 0,
+		err = media_create_pad_link(&isp->sensor_subdevs[i]->entity, source_pad,
 					    &isp->csi2_port[i].subdev.entity,
 					    CSI2_PAD_SINK,
 					    MEDIA_LNK_FL_ENABLED | MEDIA_LNK_FL_IMMUTABLE);
@@ -1105,23 +1115,19 @@ atomisp_load_firmware(struct atomisp_device *isp)
 	int rc;
 	char *fw_path = NULL;
 
-	if (firmware_name[0] != '\0') {
-		fw_path = firmware_name;
-	} else {
-		if ((isp->media_dev.hw_revision  >> ATOMISP_HW_REVISION_SHIFT)
-		    == ATOMISP_HW_REVISION_ISP2401)
-			fw_path = "shisp_2401a0_v21.bin";
+	if ((isp->media_dev.hw_revision >> ATOMISP_HW_REVISION_SHIFT) ==
+	    ATOMISP_HW_REVISION_ISP2401)
+		fw_path = "intel/ipu/shisp_2401a0_v21.bin";
 
-		if (isp->media_dev.hw_revision ==
-		    ((ATOMISP_HW_REVISION_ISP2401_LEGACY << ATOMISP_HW_REVISION_SHIFT)
-		    | ATOMISP_HW_STEPPING_A0))
-			fw_path = "shisp_2401a0_legacy_v21.bin";
+	if (isp->media_dev.hw_revision ==
+	    ((ATOMISP_HW_REVISION_ISP2401_LEGACY << ATOMISP_HW_REVISION_SHIFT) |
+	     ATOMISP_HW_STEPPING_A0))
+		fw_path = "intel/ipu/shisp_2401a0_legacy_v21.bin";
 
-		if (isp->media_dev.hw_revision ==
-		    ((ATOMISP_HW_REVISION_ISP2400 << ATOMISP_HW_REVISION_SHIFT)
-		    | ATOMISP_HW_STEPPING_B0))
-			fw_path = "shisp_2400b0_v21.bin";
-	}
+	if (isp->media_dev.hw_revision ==
+	    ((ATOMISP_HW_REVISION_ISP2400 << ATOMISP_HW_REVISION_SHIFT) |
+	     ATOMISP_HW_STEPPING_B0))
+		fw_path = "intel/ipu/shisp_2400b0_v21.bin";
 
 	if (!fw_path) {
 		dev_err(isp->dev, "Unsupported hw_revision 0x%x\n",
@@ -1130,6 +1136,9 @@ atomisp_load_firmware(struct atomisp_device *isp)
 	}
 
 	rc = request_firmware(&fw, fw_path, isp->dev);
+	/* Fallback to old fw_path without "intel/ipu/" prefix */
+	if (rc)
+		rc = request_firmware(&fw, kbasename(fw_path), isp->dev);
 	if (rc) {
 		dev_err(isp->dev,
 			"atomisp: Error %d while requesting firmware %s\n",
@@ -1487,9 +1496,6 @@ static const struct pci_device_id atomisp_pci_tbl[] = {
 MODULE_DEVICE_TABLE(pci, atomisp_pci_tbl);
 
 static struct pci_driver atomisp_pci_driver = {
-	.driver = {
-		.dev_groups = dbg_attr_groups,
-	},
 	.name = "atomisp-isp2",
 	.id_table = atomisp_pci_tbl,
 	.probe = atomisp_pci_probe,
@@ -1502,4 +1508,5 @@ MODULE_AUTHOR("Wen Wang <wen.w.wang@intel.com>");
 MODULE_AUTHOR("Xiaolin Zhang <xiaolin.zhang@intel.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Intel ATOM Platform ISP Driver");
-MODULE_IMPORT_NS(INTEL_IPU_BRIDGE);
+MODULE_IMPORT_NS("INTEL_IPU_BRIDGE");
+MODULE_IMPORT_NS("INTEL_INT3472_DISCRETE");

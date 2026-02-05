@@ -309,18 +309,18 @@ static void uas_stat_cmplt(struct urb *urb)
 	int status = urb->status;
 	bool success;
 
+	if (status) {
+		if (status != -ENOENT && status != -ECONNRESET && status != -ESHUTDOWN)
+			dev_err(&urb->dev->dev, "stat urb: status %d\n", status);
+		goto bail;
+	}
+
+	idx = be16_to_cpup(&iu->tag) - 1;
+
 	spin_lock_irqsave(&devinfo->lock, flags);
 
 	if (devinfo->resetting)
 		goto out;
-
-	if (status) {
-		if (status != -ENOENT && status != -ECONNRESET && status != -ESHUTDOWN)
-			dev_err(&urb->dev->dev, "stat urb: status %d\n", status);
-		goto out;
-	}
-
-	idx = be16_to_cpup(&iu->tag) - 1;
 	if (idx >= MAX_CMNDS || !devinfo->cmnd[idx]) {
 		dev_err(&urb->dev->dev,
 			"stat urb: no pending cmd for uas-tag %d\n", idx + 1);
@@ -375,9 +375,8 @@ static void uas_stat_cmplt(struct urb *urb)
 	default:
 		uas_log_cmd_state(cmnd, "bogus IU", iu->iu_id);
 	}
-out:
-	usb_free_urb(urb);
 	spin_unlock_irqrestore(&devinfo->lock, flags);
+	usb_free_urb(urb);
 
 	/* Unlinking of data urbs must be done without holding the lock */
 	if (data_in_urb) {
@@ -388,6 +387,12 @@ out:
 		usb_unlink_urb(data_out_urb);
 		usb_put_urb(data_out_urb);
 	}
+	return;
+
+out:
+	spin_unlock_irqrestore(&devinfo->lock, flags);
+bail:
+	usb_free_urb(urb);
 }
 
 static void uas_data_cmplt(struct urb *urb)
@@ -423,13 +428,14 @@ static void uas_data_cmplt(struct urb *urb)
 			uas_log_cmd_state(cmnd, "data cmplt err", status);
 		/* error: no data transfered */
 		scsi_set_resid(cmnd, sdb->length);
+		set_host_byte(cmnd, DID_ERROR);
 	} else {
 		scsi_set_resid(cmnd, sdb->length - urb->actual_length);
 	}
 	uas_try_complete(cmnd, __func__);
 out:
-	usb_free_urb(urb);
 	spin_unlock_irqrestore(&devinfo->lock, flags);
+	usb_free_urb(urb);
 }
 
 static void uas_cmd_cmplt(struct urb *urb)
@@ -697,6 +703,10 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd)
 	 * of queueing, no matter how fatal the error
 	 */
 	if (err == -ENODEV) {
+		if (cmdinfo->state & (COMMAND_INFLIGHT | DATA_IN_URB_INFLIGHT |
+				DATA_OUT_URB_INFLIGHT))
+			goto out;
+
 		set_host_byte(cmnd, DID_NO_CONNECT);
 		scsi_done(cmnd);
 		goto zombie;
@@ -710,6 +720,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd)
 		uas_add_work(cmnd);
 	}
 
+out:
 	devinfo->cmnd[idx] = cmnd;
 zombie:
 	spin_unlock_irqrestore(&devinfo->lock, flags);
@@ -816,7 +827,7 @@ static int uas_target_alloc(struct scsi_target *starget)
 	return 0;
 }
 
-static int uas_slave_alloc(struct scsi_device *sdev)
+static int uas_sdev_init(struct scsi_device *sdev)
 {
 	struct uas_dev_info *devinfo =
 		(struct uas_dev_info *)sdev->host->hostdata;
@@ -831,8 +842,8 @@ static int uas_slave_alloc(struct scsi_device *sdev)
 	return 0;
 }
 
-static int uas_device_configure(struct scsi_device *sdev,
-		struct queue_limits *lim)
+static int uas_sdev_configure(struct scsi_device *sdev,
+			      struct queue_limits *lim)
 {
 	struct uas_dev_info *devinfo = sdev->hostdata;
 
@@ -904,8 +915,8 @@ static const struct scsi_host_template uas_host_template = {
 	.name = "uas",
 	.queuecommand = uas_queuecommand,
 	.target_alloc = uas_target_alloc,
-	.slave_alloc = uas_slave_alloc,
-	.device_configure = uas_device_configure,
+	.sdev_init = uas_sdev_init,
+	.sdev_configure = uas_sdev_configure,
 	.eh_abort_handler = uas_eh_abort_handler,
 	.eh_device_reset_handler = uas_eh_device_reset_handler,
 	.this_id = -1,
@@ -926,7 +937,7 @@ static const struct scsi_host_template uas_host_template = {
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
 	.driver_info = (flags) }
 
-static struct usb_device_id uas_usb_ids[] = {
+static const struct usb_device_id uas_usb_ids[] = {
 #	include "unusual_uas.h"
 	{ USB_INTERFACE_INFO(USB_CLASS_MASS_STORAGE, USB_SC_SCSI, USB_PR_BULK) },
 	{ USB_INTERFACE_INFO(USB_CLASS_MASS_STORAGE, USB_SC_SCSI, USB_PR_UAS) },
@@ -1232,9 +1243,8 @@ static void uas_disconnect(struct usb_interface *intf)
  * hang on reboot when the device is still in uas mode. Note the reset is
  * necessary as some devices won't revert to usb-storage mode without it.
  */
-static void uas_shutdown(struct device *dev)
+static void uas_shutdown(struct usb_interface *intf)
 {
-	struct usb_interface *intf = to_usb_interface(dev);
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct Scsi_Host *shost = usb_get_intfdata(intf);
 	struct uas_dev_info *devinfo = (struct uas_dev_info *)shost->hostdata;
@@ -1257,7 +1267,7 @@ static struct usb_driver uas_driver = {
 	.suspend = uas_suspend,
 	.resume = uas_resume,
 	.reset_resume = uas_reset_resume,
-	.driver.shutdown = uas_shutdown,
+	.shutdown = uas_shutdown,
 	.id_table = uas_usb_ids,
 };
 
@@ -1265,7 +1275,7 @@ static int __init uas_init(void)
 {
 	int rv;
 
-	workqueue = alloc_workqueue("uas", WQ_MEM_RECLAIM, 0);
+	workqueue = alloc_workqueue("uas", WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 	if (!workqueue)
 		return -ENOMEM;
 
@@ -1287,7 +1297,8 @@ static void __exit uas_exit(void)
 module_init(uas_init);
 module_exit(uas_exit);
 
+MODULE_DESCRIPTION("USB Attached SCSI driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(USB_STORAGE);
+MODULE_IMPORT_NS("USB_STORAGE");
 MODULE_AUTHOR(
 	"Hans de Goede <hdegoede@redhat.com>, Matthew Wilcox and Sarah Sharp");

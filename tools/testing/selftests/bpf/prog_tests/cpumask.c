@@ -18,7 +18,17 @@ static const char * const cpumask_success_testcases[] = {
 	"test_insert_leave",
 	"test_insert_remove_release",
 	"test_global_mask_rcu",
+	"test_global_mask_array_one_rcu",
+	"test_global_mask_array_rcu",
+	"test_global_mask_array_l2_rcu",
+	"test_global_mask_nested_rcu",
+	"test_global_mask_nested_deep_rcu",
+	"test_global_mask_nested_deep_array_rcu",
 	"test_cpumask_weight",
+	"test_refcount_null_tracking",
+	"test_populate_reject_small_mask",
+	"test_populate_reject_unaligned",
+	"test_populate",
 };
 
 static void verify_success(const char *prog_name)
@@ -72,6 +82,5 @@ void test_cpumask(void)
 		verify_success(cpumask_success_testcases[i]);
 	}
 
-	RUN_TESTS(cpumask_success);
 	RUN_TESTS(cpumask_failure);
 }

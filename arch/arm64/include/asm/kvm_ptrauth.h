@@ -8,7 +8,7 @@
 #ifndef __ASM_KVM_PTRAUTH_H
 #define __ASM_KVM_PTRAUTH_H
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 #include <asm/sysreg.h>
 
@@ -100,11 +100,11 @@ alternative_else_nop_endif
 .endm
 #endif /* CONFIG_ARM64_PTR_AUTH */
 
-#else  /* !__ASSEMBLY */
+#else  /* !__ASSEMBLER__ */
 
 #define __ptrauth_save_key(ctxt, key)					\
 	do {								\
-		u64 __val;                                              \
+		u64 __val;						\
 		__val = read_sysreg_s(SYS_ ## key ## KEYLO_EL1);	\
 		ctxt_sys_reg(ctxt, key ## KEYLO_EL1) = __val;		\
 		__val = read_sysreg_s(SYS_ ## key ## KEYHI_EL1);	\
@@ -120,5 +120,5 @@ alternative_else_nop_endif
 		__ptrauth_save_key(ctxt, APGA);				\
 	} while(0)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_KVM_PTRAUTH_H */

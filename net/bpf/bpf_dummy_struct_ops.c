@@ -115,7 +115,7 @@ static int check_test_run_args(struct bpf_prog *prog, struct bpf_dummy_ops_test_
 
 		offset = btf_ctx_arg_offset(bpf_dummy_ops_btf, func_proto, arg_no);
 		info = find_ctx_arg_info(prog->aux, offset);
-		if (info && (info->reg_type & PTR_MAYBE_NULL))
+		if (info && type_may_be_null(info->reg_type))
 			continue;
 
 		return -EINVAL;
@@ -171,7 +171,8 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 	}
 	/* prog doesn't take the ownership of the reference from caller */
 	bpf_prog_inc(prog);
-	bpf_link_init(&link->link, BPF_LINK_TYPE_STRUCT_OPS, &bpf_struct_ops_link_lops, prog);
+	bpf_link_init(&link->link, BPF_LINK_TYPE_STRUCT_OPS, &bpf_struct_ops_link_lops, prog,
+		      prog->expected_attach_type);
 
 	op_idx = prog->expected_attach_type;
 	err = bpf_struct_ops_prepare_trampoline(tlinks, link,
@@ -272,12 +273,12 @@ static int bpf_dummy_init_member(const struct btf_type *t,
 	return -EOPNOTSUPP;
 }
 
-static int bpf_dummy_reg(void *kdata)
+static int bpf_dummy_reg(void *kdata, struct bpf_link *link)
 {
 	return -EOPNOTSUPP;
 }
 
-static void bpf_dummy_unreg(void *kdata)
+static void bpf_dummy_unreg(void *kdata, struct bpf_link *link)
 {
 }
 

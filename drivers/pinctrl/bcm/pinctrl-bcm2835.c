@@ -34,6 +34,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string_choices.h>
 #include <linux/types.h>
 #include <dt-bindings/pinctrl/bcm2835.h>
 
@@ -345,21 +346,24 @@ static int bcm2835_gpio_get_direction(struct gpio_chip *chip, unsigned int offse
 	struct bcm2835_pinctrl *pc = gpiochip_get_data(chip);
 	enum bcm2835_fsel fsel = bcm2835_pinctrl_fsel_get(pc, offset);
 
-	/* Alternative function doesn't clearly provide a direction */
-	if (fsel > BCM2835_FSEL_GPIO_OUT)
-		return -EINVAL;
+	if (fsel == BCM2835_FSEL_GPIO_OUT)
+		return GPIO_LINE_DIRECTION_OUT;
 
-	if (fsel == BCM2835_FSEL_GPIO_IN)
-		return GPIO_LINE_DIRECTION_IN;
-
-	return GPIO_LINE_DIRECTION_OUT;
+	/*
+	 * Alternative function doesn't clearly provide a direction. Default
+	 * to INPUT.
+	 */
+	return GPIO_LINE_DIRECTION_IN;
 }
 
-static void bcm2835_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int bcm2835_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			    int value)
 {
 	struct bcm2835_pinctrl *pc = gpiochip_get_data(chip);
 
 	bcm2835_gpio_set_bit(pc, value ? GPSET0 : GPCLR0, offset);
+
+	return 0;
 }
 
 static int bcm2835_gpio_direction_output(struct gpio_chip *chip,
@@ -752,7 +756,7 @@ static void bcm2835_pctl_pin_dbg_show(struct pinctrl_dev *pctldev,
 	int irq = irq_find_mapping(chip->irq.domain, offset);
 
 	seq_printf(s, "function %s in %s; irq %d (%s)",
-		fname, value ? "hi" : "lo",
+		fname, str_hi_lo(value),
 		irq, irq_type_names[pc->irq_type[offset]]);
 }
 
@@ -1019,7 +1023,7 @@ static int bcm2835_pinconf_get(struct pinctrl_dev *pctldev,
 	/* No way to read back bias config in HW */
 
 	switch (param) {
-	case PIN_CONFIG_OUTPUT:
+	case PIN_CONFIG_LEVEL:
 		if (fsel != BCM2835_FSEL_GPIO_OUT)
 			return -EINVAL;
 
@@ -1087,7 +1091,7 @@ static int bcm2835_pinconf_set(struct pinctrl_dev *pctldev,
 			break;
 
 		/* Set output-high or output-low */
-		case PIN_CONFIG_OUTPUT:
+		case PIN_CONFIG_LEVEL:
 			bcm2835_gpio_set_bit(pc, arg ? GPSET0 : GPCLR0, pin);
 			break;
 
@@ -1198,7 +1202,7 @@ static int bcm2711_pinconf_set(struct pinctrl_dev *pctldev,
 			break;
 
 		/* Set output-high or output-low */
-		case PIN_CONFIG_OUTPUT:
+		case PIN_CONFIG_LEVEL:
 			bcm2835_gpio_set_bit(pc, arg ? GPSET0 : GPCLR0, pin);
 			break;
 
@@ -1279,6 +1283,7 @@ static const struct of_device_id bcm2835_pinctrl_match[] = {
 	},
 	{}
 };
+MODULE_DEVICE_TABLE(of, bcm2835_pinctrl_match);
 
 static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 {
@@ -1428,7 +1433,7 @@ static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 	}
 
 	dev_info(dev, "GPIO_OUT persistence: %s\n",
-		 persist_gpio_outputs ? "yes" : "no");
+		 str_yes_no(persist_gpio_outputs));
 
 	return 0;
 

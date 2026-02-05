@@ -41,7 +41,7 @@ int compare_pnp_id(struct pnp_id *pos, const char *id)
 	return 0;
 }
 
-static const struct pnp_device_id *match_device(struct pnp_driver *drv,
+static const struct pnp_device_id *match_device(const struct pnp_driver *drv,
 						struct pnp_dev *dev)
 {
 	const struct pnp_device_id *drv_id = drv->id_table;
@@ -150,10 +150,28 @@ static void pnp_device_shutdown(struct device *dev)
 		drv->shutdown(pnp_dev);
 }
 
-static int pnp_bus_match(struct device *dev, struct device_driver *drv)
+static int pnp_uevent(const struct device *dev, struct kobj_uevent_env *env)
+{
+	struct pnp_id *pos;
+	const struct pnp_dev *pnp_dev = to_pnp_dev(dev);
+
+	if (!dev)
+		return -ENODEV;
+
+	pos = pnp_dev->id;
+	while (pos) {
+		if (add_uevent_var(env, "MODALIAS=pnp:d%s", pos->id))
+			return -ENOMEM;
+		pos = pos->next;
+	}
+
+	return 0;
+}
+
+static int pnp_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct pnp_dev *pnp_dev = to_pnp_dev(dev);
-	struct pnp_driver *pnp_drv = to_pnp_driver(drv);
+	const struct pnp_driver *pnp_drv = to_pnp_driver(drv);
 
 	if (match_device(pnp_drv, pnp_dev) == NULL)
 		return 0;
@@ -259,6 +277,7 @@ static const struct dev_pm_ops pnp_bus_dev_pm_ops = {
 const struct bus_type pnp_bus_type = {
 	.name    = "pnp",
 	.match   = pnp_bus_match,
+	.uevent  = pnp_uevent,
 	.probe   = pnp_device_probe,
 	.remove  = pnp_device_remove,
 	.shutdown = pnp_device_shutdown,

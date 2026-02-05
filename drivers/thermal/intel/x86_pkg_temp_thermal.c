@@ -20,6 +20,7 @@
 #include <linux/debugfs.h>
 
 #include <asm/cpu_device_id.h>
+#include <asm/msr.h>
 
 #include "thermal_interrupt.h"
 
@@ -119,9 +120,11 @@ static int sys_get_curr_temp(struct thermal_zone_device *tzd, int *temp)
 }
 
 static int
-sys_set_trip_temp(struct thermal_zone_device *tzd, int trip, int temp)
+sys_set_trip_temp(struct thermal_zone_device *tzd,
+		  const struct thermal_trip *trip, int temp)
 {
 	struct zone_device *zonedev = thermal_zone_device_priv(tzd);
+	unsigned int trip_index = THERMAL_TRIP_PRIV_TO_INT(trip->priv);
 	u32 l, h, mask, shift, intr;
 	int tj_max, val, ret;
 
@@ -132,7 +135,7 @@ sys_set_trip_temp(struct thermal_zone_device *tzd, int trip, int temp)
 
 	val = (tj_max - temp)/1000;
 
-	if (trip >= MAX_NUMBER_OF_TRIPS || val < 0 || val > 0x7f)
+	if (trip_index >= MAX_NUMBER_OF_TRIPS || val < 0 || val > 0x7f)
 		return -EINVAL;
 
 	ret = rdmsr_on_cpu(zonedev->cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT,
@@ -140,7 +143,7 @@ sys_set_trip_temp(struct thermal_zone_device *tzd, int trip, int temp)
 	if (ret < 0)
 		return ret;
 
-	if (trip) {
+	if (trip_index) {
 		mask = THERM_MASK_THRESHOLD1;
 		shift = THERM_SHIFT_THRESHOLD1;
 		intr = THERM_INT_THRESHOLD1_ENABLE;
@@ -296,6 +299,7 @@ static int pkg_temp_thermal_trips_init(int cpu, int tj_max,
 
 		trips[i].type = THERMAL_TRIP_PASSIVE;
 		trips[i].flags |= THERMAL_TRIP_FLAG_RW_TEMP;
+		trips[i].priv = THERMAL_INT_TO_TRIP_PRIV(i);
 
 		pr_debug("%s: cpu=%d, trip=%d, temp=%d\n",
 			 __func__, cpu, i, trips[i].temperature);
@@ -326,6 +330,7 @@ static int pkg_temp_thermal_device_add(unsigned int cpu)
 	tj_max = intel_tcc_get_tjmax(cpu);
 	if (tj_max < 0)
 		return tj_max;
+	tj_max *= 1000;
 
 	zonedev = kzalloc(sizeof(*zonedev), GFP_KERNEL);
 	if (!zonedev)
@@ -521,7 +526,7 @@ static void __exit pkg_temp_thermal_exit(void)
 }
 module_exit(pkg_temp_thermal_exit)
 
-MODULE_IMPORT_NS(INTEL_TCC);
+MODULE_IMPORT_NS("INTEL_TCC");
 MODULE_DESCRIPTION("X86 PKG TEMP Thermal Driver");
 MODULE_AUTHOR("Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>");
 MODULE_LICENSE("GPL v2");

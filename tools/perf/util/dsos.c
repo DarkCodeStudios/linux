@@ -72,6 +72,7 @@ static int dsos__read_build_ids_cb(struct dso *dso, void *data)
 {
 	struct dsos__read_build_ids_cb_args *args = data;
 	struct nscookie nsc;
+	struct build_id bid = { .size = 0, };
 
 	if (args->with_hits && !dso__hit(dso) && !dso__is_vdso(dso))
 		return 0;
@@ -80,15 +81,15 @@ static int dsos__read_build_ids_cb(struct dso *dso, void *data)
 		return 0;
 	}
 	nsinfo__mountns_enter(dso__nsinfo(dso), &nsc);
-	if (filename__read_build_id(dso__long_name(dso), dso__bid(dso)) > 0) {
+	if (filename__read_build_id(dso__long_name(dso), &bid) > 0) {
+		dso__set_build_id(dso, &bid);
 		args->have_build_id = true;
-		dso__set_has_build_id(dso);
 	} else if (errno == ENOENT && dso__nsinfo(dso)) {
 		char *new_name = dso__filename_with_chroot(dso, dso__long_name(dso));
 
-		if (new_name && filename__read_build_id(new_name, dso__bid(dso)) > 0) {
+		if (new_name && filename__read_build_id(new_name, &bid) > 0) {
+			dso__set_build_id(dso, &bid);
 			args->have_build_id = true;
-			dso__set_has_build_id(dso);
 		}
 		free(new_name);
 	}
@@ -155,14 +156,18 @@ static int dsos__cmp_key_long_name_id(const void *vkey, const void *vdso)
  */
 static struct dso *__dsos__find_by_longname_id(struct dsos *dsos,
 					       const char *name,
-					       struct dso_id *id,
+					       const struct dso_id *id,
 					       bool write_locked)
+	SHARED_LOCKS_REQUIRED(dsos->lock)
 {
 	struct dsos__key key = {
 		.long_name = name,
 		.id = id,
 	};
 	struct dso **res;
+
+	if (dsos->dsos == NULL)
+		return NULL;
 
 	if (!dsos->sorted) {
 		if (!write_locked) {
@@ -203,11 +208,27 @@ int __dsos__add(struct dsos *dsos, struct dso *dso)
 		dsos->dsos = temp;
 		dsos->allocated = to_allocate;
 	}
-	dsos->dsos[dsos->cnt++] = dso__get(dso);
-	if (dsos->cnt >= 2 && dsos->sorted) {
-		dsos->sorted = dsos__cmp_long_name_id_short_name(&dsos->dsos[dsos->cnt - 2],
-								 &dsos->dsos[dsos->cnt - 1])
-			<= 0;
+	if (!dsos->sorted) {
+		dsos->dsos[dsos->cnt++] = dso__get(dso);
+	} else {
+		int low = 0, high = dsos->cnt - 1;
+		int insert = dsos->cnt; /* Default to inserting at the end. */
+
+		while (low <= high) {
+			int mid = low + (high - low) / 2;
+			int cmp = dsos__cmp_long_name_id_short_name(&dsos->dsos[mid], &dso);
+
+			if (cmp < 0) {
+				low = mid + 1;
+			} else {
+				high = mid - 1;
+				insert = mid;
+			}
+		}
+		memmove(&dsos->dsos[insert + 1], &dsos->dsos[insert],
+			(dsos->cnt - insert) * sizeof(struct dso *));
+		dsos->cnt++;
+		dsos->dsos[insert] = dso__get(dso);
 	}
 	dso__set_dsos(dso, dsos);
 	return 0;
@@ -225,7 +246,7 @@ int dsos__add(struct dsos *dsos, struct dso *dso)
 
 struct dsos__find_id_cb_args {
 	const char *name;
-	struct dso_id *id;
+	const struct dso_id *id;
 	struct dso *res;
 };
 
@@ -241,8 +262,9 @@ static int dsos__find_id_cb(struct dso *dso, void *data)
 
 }
 
-static struct dso *__dsos__find_id(struct dsos *dsos, const char *name, struct dso_id *id,
+static struct dso *__dsos__find_id(struct dsos *dsos, const char *name, const struct dso_id *id,
 				   bool cmp_short, bool write_locked)
+	SHARED_LOCKS_REQUIRED(dsos->lock)
 {
 	struct dso *res;
 
@@ -265,7 +287,7 @@ struct dso *dsos__find(struct dsos *dsos, const char *name, bool cmp_short)
 	struct dso *res;
 
 	down_read(&dsos->lock);
-	res = __dsos__find_id(dsos, name, NULL, cmp_short, /*write_locked=*/false);
+	res = __dsos__find_id(dsos, name, &dso_id_empty, cmp_short, /*write_locked=*/false);
 	up_read(&dsos->lock);
 	return res;
 }
@@ -275,7 +297,7 @@ static void dso__set_basename(struct dso *dso)
 	char *base, *lname;
 	int tid;
 
-	if (sscanf(dso__long_name(dso), "/tmp/perf-%d.map", &tid) == 1) {
+	if (perf_pid_map_tid(dso__long_name(dso), &tid)) {
 		if (asprintf(&base, "[JIT] tid %d", tid) < 0)
 			return;
 	} else {
@@ -302,7 +324,7 @@ static void dso__set_basename(struct dso *dso)
 	dso__set_short_name(dso, base, true);
 }
 
-static struct dso *__dsos__addnew_id(struct dsos *dsos, const char *name, struct dso_id *id)
+static struct dso *__dsos__addnew_id(struct dsos *dsos, const char *name, const struct dso_id *id)
 {
 	struct dso *dso = dso__new_id(name, id);
 
@@ -318,17 +340,18 @@ static struct dso *__dsos__addnew_id(struct dsos *dsos, const char *name, struct
 	return dso;
 }
 
-static struct dso *__dsos__findnew_id(struct dsos *dsos, const char *name, struct dso_id *id)
+static struct dso *__dsos__findnew_id(struct dsos *dsos, const char *name, const struct dso_id *id)
+	SHARED_LOCKS_REQUIRED(dsos->lock)
 {
 	struct dso *dso = __dsos__find_id(dsos, name, id, false, /*write_locked=*/true);
 
-	if (dso && dso_id__empty(dso__id(dso)) && !dso_id__empty(id))
-		__dso__inject_id(dso, id);
+	if (dso)
+		__dso__improve_id(dso, id);
 
 	return dso ? dso : __dsos__addnew_id(dsos, name, id);
 }
 
-struct dso *dsos__findnew_id(struct dsos *dsos, const char *name, struct dso_id *id)
+struct dso *dsos__findnew_id(struct dsos *dsos, const char *name, const struct dso_id *id)
 {
 	struct dso *dso;
 	down_write(&dsos->lock);
@@ -351,7 +374,7 @@ static int dsos__fprintf_buildid_cb(struct dso *dso, void *data)
 
 	if (args->skip && args->skip(dso, args->parm))
 		return 0;
-	build_id__sprintf(dso__bid(dso), sbuild_id);
+	build_id__snprintf(dso__bid(dso), sbuild_id, sizeof(sbuild_id));
 	args->ret += fprintf(args->fp, "%-40s %s\n", sbuild_id, dso__long_name(dso));
 	return 0;
 }
@@ -414,7 +437,8 @@ struct dso *dsos__findnew_module_dso(struct dsos *dsos,
 
 	down_write(&dsos->lock);
 
-	dso = __dsos__find_id(dsos, m->name, NULL, /*cmp_short=*/true, /*write_locked=*/true);
+	dso = __dsos__find_id(dsos, m->name, &dso_id_empty, /*cmp_short=*/true,
+			      /*write_locked=*/true);
 	if (dso) {
 		up_write(&dsos->lock);
 		return dso;

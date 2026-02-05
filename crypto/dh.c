@@ -145,9 +145,9 @@ static int dh_is_pubkey_valid(struct dh_ctx *ctx, MPI y)
 	 * ->p is odd, so no need to explicitly subtract one
 	 * from it before shifting to the right.
 	 */
-	mpi_rshift(q, ctx->p, 1);
+	ret = mpi_rshift(q, ctx->p, 1) ?:
+	      mpi_powm(val, y, q, ctx->p);
 
-	ret = mpi_powm(val, y, q, ctx->p);
 	mpi_free(q);
 	if (ret) {
 		mpi_free(val);
@@ -920,7 +920,7 @@ static void __exit dh_exit(void)
 	crypto_unregister_kpp(&dh);
 }
 
-subsys_initcall(dh_init);
+module_init(dh_init);
 module_exit(dh_exit);
 MODULE_ALIAS_CRYPTO("dh");
 MODULE_LICENSE("GPL");

@@ -9,6 +9,7 @@
 
 #include "compiler.h"
 
+#ifndef NOLIBC_NO_RUNTIME
 #if defined(_NOLIBC_STACKPROTECTOR)
 
 #include "sys.h"
@@ -18,7 +19,8 @@
  * triggering stack protector errors themselves
  */
 
-__attribute__((weak,noreturn,section(".text.nolibc_stack_chk")))
+void __stack_chk_fail(void);
+__attribute__((weak,used,noreturn,section(".text.nolibc_stack_chk")))
 void __stack_chk_fail(void)
 {
 	pid_t pid;
@@ -28,13 +30,14 @@ void __stack_chk_fail(void)
 	for (;;);
 }
 
+void __stack_chk_fail_local(void);
 __attribute__((weak,noreturn,section(".text.nolibc_stack_chk")))
 void __stack_chk_fail_local(void)
 {
 	__stack_chk_fail();
 }
 
-__attribute__((weak,section(".data.nolibc_stack_chk")))
+__attribute__((weak,used,section(".data.nolibc_stack_chk")))
 uintptr_t __stack_chk_guard;
 
 static __no_stack_protector void __stack_chk_init(void)
@@ -47,5 +50,6 @@ static __no_stack_protector void __stack_chk_init(void)
 #else /* !defined(_NOLIBC_STACKPROTECTOR) */
 static void __stack_chk_init(void) {}
 #endif /* defined(_NOLIBC_STACKPROTECTOR) */
+#endif /* NOLIBC_NO_RUNTIME */
 
 #endif /* _NOLIBC_STACKPROTECTOR_H */

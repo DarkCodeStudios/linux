@@ -306,7 +306,6 @@ static const struct component_ops mtk_disp_merge_component_ops = {
 static int mtk_disp_merge_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct resource *res;
 	struct mtk_disp_merge *priv;
 	int ret;
 
@@ -314,24 +313,20 @@ static int mtk_disp_merge_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	priv->regs = devm_ioremap_resource(dev, res);
-	if (IS_ERR(priv->regs)) {
-		dev_err(dev, "failed to ioremap merge\n");
-		return PTR_ERR(priv->regs);
-	}
+	priv->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(priv->regs))
+		return dev_err_probe(dev, PTR_ERR(priv->regs),
+				     "failed to ioremap merge\n");
 
 	priv->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(priv->clk)) {
-		dev_err(dev, "failed to get merge clk\n");
-		return PTR_ERR(priv->clk);
-	}
+	if (IS_ERR(priv->clk))
+		return dev_err_probe(dev, PTR_ERR(priv->clk),
+				     "failed to get merge clk\n");
 
 	priv->async_clk = devm_clk_get_optional(dev, "merge_async");
-	if (IS_ERR(priv->async_clk)) {
-		dev_err(dev, "failed to get merge async clock\n");
-		return PTR_ERR(priv->async_clk);
-	}
+	if (IS_ERR(priv->async_clk))
+		return dev_err_probe(dev, PTR_ERR(priv->async_clk),
+				     "failed to get merge async clock\n");
 
 	if (priv->async_clk) {
 		priv->reset_ctl = devm_reset_control_get_optional_exclusive(dev, NULL);
@@ -354,9 +349,9 @@ static int mtk_disp_merge_probe(struct platform_device *pdev)
 
 	ret = component_add(dev, &mtk_disp_merge_component_ops);
 	if (ret != 0)
-		dev_err(dev, "Failed to add component: %d\n", ret);
+		return dev_err_probe(dev, ret, "Failed to add component\n");
 
-	return ret;
+	return 0;
 }
 
 static void mtk_disp_merge_remove(struct platform_device *pdev)
@@ -373,7 +368,7 @@ MODULE_DEVICE_TABLE(of, mtk_disp_merge_driver_dt_match);
 
 struct platform_driver mtk_disp_merge_driver = {
 	.probe = mtk_disp_merge_probe,
-	.remove_new = mtk_disp_merge_remove,
+	.remove = mtk_disp_merge_remove,
 	.driver = {
 		.name = "mediatek-disp-merge",
 		.of_match_table = mtk_disp_merge_driver_dt_match,

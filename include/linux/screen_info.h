@@ -12,6 +12,7 @@
 #define SCREEN_INFO_MAX_RESOURCES	3
 
 struct pci_dev;
+struct pixel_format;
 struct resource;
 
 static inline bool __screen_info_has_lfb(unsigned int type)
@@ -47,6 +48,16 @@ static inline u64 __screen_info_lfb_size(const struct screen_info *si, unsigned 
 	if (type == VIDEO_TYPE_VLFB)
 		lfb_size <<= 16;
 	return lfb_size;
+}
+
+static inline bool __screen_info_vbe_mode_nonvga(const struct screen_info *si)
+{
+	/*
+	 * VESA modes typically run on VGA hardware. Set bit 5 signals that this
+	 * is not the case. Drivers can then not make use of VGA resources. See
+	 * Sec 4.4 of the VBE 2.0 spec.
+	 */
+	return si->vesa_attributes & BIT(5);
 }
 
 static inline unsigned int __screen_info_video_type(unsigned int type)
@@ -116,7 +127,17 @@ static inline unsigned int screen_info_video_type(const struct screen_info *si)
 	return VIDEO_TYPE_CGA;
 }
 
+static inline u32 __screen_info_vesapm_info_base(const struct screen_info *si)
+{
+	if (si->vesapm_seg < 0xc000)
+		return 0;
+	return (si->vesapm_seg << 4) + si->vesapm_off;
+}
+
 ssize_t screen_info_resources(const struct screen_info *si, struct resource *r, size_t num);
+
+u32 __screen_info_lfb_bits_per_pixel(const struct screen_info *si);
+int screen_info_pixel_format(const struct screen_info *si, struct pixel_format *f);
 
 #if defined(CONFIG_PCI)
 void screen_info_apply_fixups(void);

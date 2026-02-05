@@ -14,13 +14,11 @@
 
 #include <linux/bits.h>
 
-#define CIF_SIE			0	/* CPU needs SIE exit cleanup */
 #define CIF_NOHZ_DELAY		2	/* delay HZ disable for a tick */
 #define CIF_ENABLED_WAIT	5	/* in enabled wait state */
 #define CIF_MCCK_GUEST		6	/* machine check happening in guest */
 #define CIF_DEDICATED_CPU	7	/* this CPU is dedicated */
 
-#define _CIF_SIE		BIT(CIF_SIE)
 #define _CIF_NOHZ_DELAY		BIT(CIF_NOHZ_DELAY)
 #define _CIF_ENABLED_WAIT	BIT(CIF_ENABLED_WAIT)
 #define _CIF_MCCK_GUEST		BIT(CIF_MCCK_GUEST)
@@ -28,11 +26,12 @@
 
 #define RESTART_FLAG_CTLREGS	_AC(1 << 0, U)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/cpumask.h>
 #include <linux/linkage.h>
 #include <linux/irqflags.h>
+#include <linux/bitops.h>
 #include <asm/fpu-types.h>
 #include <asm/cpu.h>
 #include <asm/page.h>
@@ -41,38 +40,50 @@
 #include <asm/runtime_instr.h>
 #include <asm/irqflags.h>
 #include <asm/alternative.h>
+#include <asm/fault.h>
+
+struct pcpu {
+	unsigned long ec_mask;		/* bit mask for ec_xxx functions */
+	unsigned long ec_clk;		/* sigp timestamp for ec_xxx */
+	unsigned long flags;		/* per CPU flags */
+	unsigned long capacity;		/* cpu capacity for scheduler */
+	signed char state;		/* physical cpu state */
+	signed char polarization;	/* physical polarization */
+	u16 address;			/* physical cpu address */
+};
+
+DECLARE_PER_CPU(struct pcpu, pcpu_devices);
 
 typedef long (*sys_call_ptr_t)(struct pt_regs *regs);
 
+static __always_inline struct pcpu *this_pcpu(void)
+{
+	return (struct pcpu *)(get_lowcore()->pcpu);
+}
+
 static __always_inline void set_cpu_flag(int flag)
 {
-	S390_lowcore.cpu_flags |= (1UL << flag);
+	set_bit(flag, &this_pcpu()->flags);
 }
 
 static __always_inline void clear_cpu_flag(int flag)
 {
-	S390_lowcore.cpu_flags &= ~(1UL << flag);
+	clear_bit(flag, &this_pcpu()->flags);
 }
 
 static __always_inline bool test_cpu_flag(int flag)
 {
-	return S390_lowcore.cpu_flags & (1UL << flag);
+	return test_bit(flag, &this_pcpu()->flags);
 }
 
 static __always_inline bool test_and_set_cpu_flag(int flag)
 {
-	if (test_cpu_flag(flag))
-		return true;
-	set_cpu_flag(flag);
-	return false;
+	return test_and_set_bit(flag, &this_pcpu()->flags);
 }
 
 static __always_inline bool test_and_clear_cpu_flag(int flag)
 {
-	if (!test_cpu_flag(flag))
-		return false;
-	clear_cpu_flag(flag);
-	return true;
+	return test_and_clear_bit(flag, &this_pcpu()->flags);
 }
 
 /*
@@ -81,9 +92,7 @@ static __always_inline bool test_and_clear_cpu_flag(int flag)
  */
 static __always_inline bool test_cpu_flag_of(int flag, int cpu)
 {
-	struct lowcore *lc = lowcore_ptr[cpu];
-
-	return lc->cpu_flags & (1UL << flag);
+	return test_bit(flag, &per_cpu(pcpu_devices, cpu).flags);
 }
 
 #define arch_needs_cpu() test_cpu_flag(CIF_NOHZ_DELAY)
@@ -110,18 +119,12 @@ extern void execve_tail(void);
 unsigned long vdso_text_size(void);
 unsigned long vdso_size(void);
 
-/*
- * User space process size: 2GB for 31 bit, 4TB or 8PT for 64 bit.
- */
-
-#define TASK_SIZE		(test_thread_flag(TIF_31BIT) ? \
-					_REGION3_SIZE : TASK_SIZE_MAX)
-#define TASK_UNMAPPED_BASE	(test_thread_flag(TIF_31BIT) ? \
-					(_REGION3_SIZE >> 1) : (_REGION2_SIZE >> 1))
+#define TASK_SIZE		(TASK_SIZE_MAX)
+#define TASK_UNMAPPED_BASE	(_REGION2_SIZE >> 1)
 #define TASK_SIZE_MAX		(-PAGE_SIZE)
 
 #define VDSO_BASE		(STACK_TOP + PAGE_SIZE)
-#define VDSO_LIMIT		(test_thread_flag(TIF_31BIT) ? _REGION3_SIZE : _REGION2_SIZE)
+#define VDSO_LIMIT		(_REGION2_SIZE)
 #define STACK_TOP		(VDSO_LIMIT - vdso_size() - PAGE_SIZE)
 #define STACK_TOP_MAX		(_REGION2_SIZE - vdso_size() - PAGE_SIZE)
 
@@ -149,13 +152,12 @@ static __always_inline void __stackleak_poison(unsigned long erase_low,
 		"	la	%[addr],256(%[addr])\n"
 		"	brctg	%[tmp],0b\n"
 		"1:	stg	%[poison],0(%[addr])\n"
-		"	larl	%[tmp],3f\n"
-		"	ex	%[count],0(%[tmp])\n"
+		"	exrl	%[count],3f\n"
 		"	j	4f\n"
 		"2:	stg	%[poison],0(%[addr])\n"
 		"	j	4f\n"
 		"3:	mvc	8(1,%[addr]),0(%[addr])\n"
-		"4:\n"
+		"4:"
 		: [addr] "+&a" (erase_low), [count] "+&d" (count), [tmp] "=&a" (tmp)
 		: [poison] "d" (poison)
 		: "memory", "cc"
@@ -173,11 +175,8 @@ struct thread_struct {
 	unsigned long system_timer;		/* task cputime in kernel space */
 	unsigned long hardirq_timer;		/* task cputime in hardirq context */
 	unsigned long softirq_timer;		/* task cputime in softirq context */
-	const sys_call_ptr_t *sys_call_table;	/* system call table address */
-	unsigned long gmap_addr;		/* address of last gmap fault. */
-	unsigned int gmap_write_flag;		/* gmap fault write indication */
+	union teid gmap_teid;			/* address and flags of last gmap fault */
 	unsigned int gmap_int_code;		/* int code of last gmap fault */
-	unsigned int gmap_pfault;		/* signal of a pending guest pfault */
 	int ufpu_flags;				/* user fpu flags */
 	int kfpu_flags;				/* kernel fpu flags */
 
@@ -269,7 +268,7 @@ static __always_inline unsigned long __current_stack_pointer(void)
 
 static __always_inline bool on_thread_stack(void)
 {
-	unsigned long ksp = S390_lowcore.kernel_stack;
+	unsigned long ksp = get_lowcore()->kernel_stack;
 
 	return !((ksp ^ current_stack_pointer) & ~(THREAD_SIZE - 1));
 }
@@ -373,14 +372,19 @@ static inline void local_mcck_enable(void)
 /*
  * Rewind PSW instruction address by specified number of bytes.
  */
-static inline unsigned long __rewind_psw(psw_t psw, unsigned long ilc)
+static inline unsigned long __rewind_psw(psw_t psw, long ilen)
 {
 	unsigned long mask;
 
 	mask = (psw.mask & PSW_MASK_EA) ? -1UL :
 	       (psw.mask & PSW_MASK_BA) ? (1UL << 31) - 1 :
 					  (1UL << 24) - 1;
-	return (psw.addr - ilc) & mask;
+	return (psw.addr - ilen) & mask;
+}
+
+static inline unsigned long __forward_psw(psw_t psw, long ilen)
+{
+	return __rewind_psw(psw, -ilen);
 }
 
 /*
@@ -405,9 +409,13 @@ static __always_inline bool regs_irqs_disabled(struct pt_regs *regs)
 
 static __always_inline void bpon(void)
 {
-	asm volatile(ALTERNATIVE("nop", ".insn	rrf,0xb2e80000,0,0,13,0", 82));
+	asm_inline volatile(
+		ALTERNATIVE("	nop\n",
+			    "	.insn	rrf,0xb2e80000,0,0,13,0\n",
+			    ALT_SPEC(82))
+		);
 }
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __ASM_S390_PROCESSOR_H */

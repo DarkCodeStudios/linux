@@ -247,11 +247,11 @@
 						    _TRANSA_HDCP2_STREAM_STATUS, \
 						    _TRANSB_HDCP2_STREAM_STATUS)
 #define   STREAM_ENCRYPTION_STATUS	REG_BIT(31)
-#define   STREAM_TYPE_STATUS		REG_BIT(30)
+#define   STREAM_TYPE_STATUS_MASK	REG_GENMASK(30, 30)
 #define HDCP2_STREAM_STATUS(dev_priv, trans, port) \
 					(TRANS_HDCP(dev_priv) ? \
 					 TRANS_HDCP2_STREAM_STATUS(trans) : \
-					 PIPE_HDCP2_STREAM_STATUS(pipe))
+					 PIPE_HDCP2_STREAM_STATUS(port))
 
 #define _PORTA_HDCP2_AUTH_STREAM		0x66F00
 #define _PORTB_HDCP2_AUTH_STREAM		0x66F04
@@ -263,7 +263,7 @@
 #define TRANS_HDCP2_AUTH_STREAM(trans)	_MMIO_TRANS(trans, \
 						    _TRANSA_HDCP2_AUTH_STREAM, \
 						    _TRANSB_HDCP2_AUTH_STREAM)
-#define   AUTH_STREAM_TYPE		REG_BIT(31)
+#define   AUTH_STREAM_TYPE_MASK		REG_GENMASK(31, 31)
 #define HDCP2_AUTH_STREAM(dev_priv, trans, port) \
 					(TRANS_HDCP(dev_priv) ? \
 					 TRANS_HDCP2_AUTH_STREAM(trans) : \

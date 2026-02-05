@@ -5,6 +5,7 @@
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  */
+#include <crypto/md5.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
@@ -18,6 +19,8 @@
 #include "cifs_unicode.h"
 #include "smb2proto.h"
 #include "cifs_ioctl.h"
+#include "fs_context.h"
+#include "reparse.h"
 
 /*
  * M-F Symlink Functions - Begin
@@ -33,23 +36,6 @@
 #define CIFS_MF_SYMLINK_LEN_FORMAT "XSym\n%04u\n"
 #define CIFS_MF_SYMLINK_MD5_FORMAT "%16phN\n"
 #define CIFS_MF_SYMLINK_MD5_ARGS(md5_hash) md5_hash
-
-static int
-symlink_hash(unsigned int link_len, const char *link_str, u8 *md5_hash)
-{
-	int rc;
-	struct shash_desc *md5 = NULL;
-
-	rc = cifs_alloc_hash("md5", &md5);
-	if (rc)
-		return rc;
-
-	rc = crypto_shash_digest(md5, link_str, link_len, md5_hash);
-	if (rc)
-		cifs_dbg(VFS, "%s: Could not generate md5 hash\n", __func__);
-	cifs_free_hash(&md5);
-	return rc;
-}
 
 static int
 parse_mf_symlink(const u8 *buf, unsigned int buf_len, unsigned int *_link_len,
@@ -75,11 +61,7 @@ parse_mf_symlink(const u8 *buf, unsigned int buf_len, unsigned int *_link_len,
 	if (link_len > CIFS_MF_SYMLINK_LINK_MAXLEN)
 		return -EINVAL;
 
-	rc = symlink_hash(link_len, link_str, md5_hash);
-	if (rc) {
-		cifs_dbg(FYI, "%s: MD5 hash failure: %d\n", __func__, rc);
-		return rc;
-	}
+	md5(link_str, link_len, md5_hash);
 
 	scnprintf(md5_str2, sizeof(md5_str2),
 		  CIFS_MF_SYMLINK_MD5_FORMAT,
@@ -101,7 +83,6 @@ parse_mf_symlink(const u8 *buf, unsigned int buf_len, unsigned int *_link_len,
 static int
 format_mf_symlink(u8 *buf, unsigned int buf_len, const char *link_str)
 {
-	int rc;
 	unsigned int link_len;
 	unsigned int ofs;
 	u8 md5_hash[16];
@@ -114,11 +95,7 @@ format_mf_symlink(u8 *buf, unsigned int buf_len, const char *link_str)
 	if (link_len > CIFS_MF_SYMLINK_LINK_MAXLEN)
 		return -ENAMETOOLONG;
 
-	rc = symlink_hash(link_len, link_str, md5_hash);
-	if (rc) {
-		cifs_dbg(FYI, "%s: MD5 hash failure: %d\n", __func__, rc);
-		return rc;
-	}
+	md5(link_str, link_len, md5_hash);
 
 	scnprintf(buf, buf_len,
 		  CIFS_MF_SYMLINK_LEN_FORMAT CIFS_MF_SYMLINK_MD5_FORMAT,
@@ -183,7 +160,8 @@ create_mf_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 		goto out;
 
 	if (bytes_written != CIFS_MF_SYMLINK_FILE_SIZE)
-		rc = -EIO;
+		rc = smb_EIO2(smb_eio_trace_symlink_file_size,
+			      bytes_written, CIFS_MF_SYMLINK_FILE_SIZE);
 out:
 	kfree(buf);
 	return rc;
@@ -257,7 +235,7 @@ cifs_query_mf_symlink(unsigned int xid, struct cifs_tcon *tcon,
 	struct cifs_open_parms oparms;
 	struct cifs_io_parms io_parms = {0};
 	int buf_type = CIFS_NO_BUFFER;
-	FILE_ALL_INFO file_info;
+	struct cifs_open_info_data query_data;
 
 	oparms = (struct cifs_open_parms) {
 		.tcon = tcon,
@@ -269,11 +247,11 @@ cifs_query_mf_symlink(unsigned int xid, struct cifs_tcon *tcon,
 		.fid = &fid,
 	};
 
-	rc = CIFS_open(xid, &oparms, &oplock, &file_info);
+	rc = tcon->ses->server->ops->open(xid, &oparms, &oplock, &query_data);
 	if (rc)
 		return rc;
 
-	if (file_info.EndOfFile != cpu_to_le64(CIFS_MF_SYMLINK_FILE_SIZE)) {
+	if (query_data.fi.EndOfFile != cpu_to_le64(CIFS_MF_SYMLINK_FILE_SIZE)) {
 		rc = -ENOENT;
 		/* it's not a symlink */
 		goto out;
@@ -312,7 +290,7 @@ cifs_create_mf_symlink(unsigned int xid, struct cifs_tcon *tcon,
 		.fid = &fid,
 	};
 
-	rc = CIFS_open(xid, &oparms, &oplock, NULL);
+	rc = tcon->ses->server->ops->open(xid, &oparms, &oplock, NULL);
 	if (rc)
 		return rc;
 
@@ -447,7 +425,8 @@ smb3_create_mf_symlink(unsigned int xid, struct cifs_tcon *tcon,
 
 	/* Make sure we wrote all of the symlink data */
 	if ((rc == 0) && (*pbytes_written != CIFS_MF_SYMLINK_FILE_SIZE))
-		rc = -EIO;
+		rc = smb_EIO2(smb_eio_trace_short_symlink_write,
+			      *pbytes_written, CIFS_MF_SYMLINK_FILE_SIZE);
 
 	SMB2_close(xid, tcon, fid.persistent_fid, fid.volatile_fid);
 
@@ -474,7 +453,7 @@ cifs_hardlink(struct dentry *old_file, struct inode *inode,
 	struct cifsInodeInfo *cifsInode;
 
 	if (unlikely(cifs_forced_shutdown(cifs_sb)))
-		return -EIO;
+		return smb_EIO(smb_eio_trace_forced_shutdown);
 
 	tlink = cifs_sb_tlink(cifs_sb);
 	if (IS_ERR(tlink))
@@ -569,7 +548,6 @@ cifs_symlink(struct mnt_idmap *idmap, struct inode *inode,
 	int rc = -EOPNOTSUPP;
 	unsigned int xid;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
-	struct TCP_Server_Info *server;
 	struct tcon_link *tlink;
 	struct cifs_tcon *pTcon;
 	const char *full_path;
@@ -577,7 +555,7 @@ cifs_symlink(struct mnt_idmap *idmap, struct inode *inode,
 	struct inode *newinode = NULL;
 
 	if (unlikely(cifs_forced_shutdown(cifs_sb)))
-		return -EIO;
+		return smb_EIO(smb_eio_trace_forced_shutdown);
 
 	page = alloc_dentry_path();
 	if (!page)
@@ -588,10 +566,10 @@ cifs_symlink(struct mnt_idmap *idmap, struct inode *inode,
 	tlink = cifs_sb_tlink(cifs_sb);
 	if (IS_ERR(tlink)) {
 		rc = PTR_ERR(tlink);
+		/* BB could be clearer if skipped put_tlink on error here, but harmless */
 		goto symlink_exit;
 	}
 	pTcon = tlink_tcon(tlink);
-	server = cifs_pick_channel(pTcon->ses);
 
 	full_path = build_path_from_dentry(direntry, page);
 	if (IS_ERR(full_path)) {
@@ -603,19 +581,45 @@ cifs_symlink(struct mnt_idmap *idmap, struct inode *inode,
 	cifs_dbg(FYI, "symname is %s\n", symname);
 
 	/* BB what if DFS and this volume is on different share? BB */
-	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MF_SYMLINKS) {
-		rc = create_mf_symlink(xid, pTcon, cifs_sb, full_path, symname);
+	rc = -EOPNOTSUPP;
+	switch (cifs_symlink_type(cifs_sb)) {
+	case CIFS_SYMLINK_TYPE_UNIX:
 #ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
-	} else if (pTcon->unix_ext) {
-		rc = CIFSUnixCreateSymLink(xid, pTcon, full_path, symname,
-					   cifs_sb->local_nls,
-					   cifs_remap(cifs_sb));
+		if (pTcon->unix_ext) {
+			rc = CIFSUnixCreateSymLink(xid, pTcon, full_path,
+						   symname,
+						   cifs_sb->local_nls,
+						   cifs_remap(cifs_sb));
+		}
 #endif /* CONFIG_CIFS_ALLOW_INSECURE_LEGACY */
-	} else if (server->ops->create_reparse_symlink) {
-		rc =  server->ops->create_reparse_symlink(xid, inode, direntry,
-							  pTcon, full_path,
-							  symname);
-		goto symlink_exit;
+		break;
+
+	case CIFS_SYMLINK_TYPE_MFSYMLINKS:
+		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MF_SYMLINKS) {
+			rc = create_mf_symlink(xid, pTcon, cifs_sb,
+					       full_path, symname);
+		}
+		break;
+
+	case CIFS_SYMLINK_TYPE_SFU:
+		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
+			rc = __cifs_sfu_make_node(xid, inode, direntry, pTcon,
+						  full_path, S_IFLNK,
+						  0, symname);
+		}
+		break;
+
+	case CIFS_SYMLINK_TYPE_NATIVE:
+	case CIFS_SYMLINK_TYPE_NFS:
+	case CIFS_SYMLINK_TYPE_WSL:
+		if (CIFS_REPARSE_SUPPORT(pTcon)) {
+			rc = create_reparse_symlink(xid, inode, direntry, pTcon,
+						    full_path, symname);
+			goto symlink_exit;
+		}
+		break;
+	default:
+		break;
 	}
 
 	if (rc == 0) {

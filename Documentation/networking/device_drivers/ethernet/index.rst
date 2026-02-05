@@ -28,6 +28,7 @@ Contents:
    freescale/gianfar
    google/gve
    huawei/hinic
+   huawei/hinic3
    intel/e100
    intel/e1000
    intel/e1000e
@@ -44,19 +45,25 @@ Contents:
    marvell/octeon_ep
    marvell/octeon_ep_vf
    mellanox/mlx5/index
+   meta/fbnic
    microsoft/netvsc
+   mucse/rnpgbe
    neterion/s2io
    netronome/nfp
    pensando/ionic
+   pensando/ionic_rdma
+   qualcomm/ppe/ppe
    smsc/smc9
    stmicro/stmmac
    ti/cpsw
    ti/cpsw_switchdev
    ti/am65_nuss_cpsw_switchdev
    ti/tlan
-   toshiba/spider_net
+   ti/icssg_prueth
    wangxun/txgbe
+   wangxun/txgbevf
    wangxun/ngbe
+   wangxun/ngbevf
 
 .. only::  subproject and html
 

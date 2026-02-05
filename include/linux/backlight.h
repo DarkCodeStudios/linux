@@ -10,9 +10,7 @@
 #define _LINUX_BACKLIGHT_H
 
 #include <linux/device.h>
-#include <linux/fb.h>
 #include <linux/mutex.h>
-#include <linux/notifier.h>
 #include <linux/types.h>
 
 /**
@@ -64,24 +62,6 @@ enum backlight_type {
 	 * @BACKLIGHT_TYPE_MAX: Number of entries.
 	 */
 	BACKLIGHT_TYPE_MAX,
-};
-
-/**
- * enum backlight_notification - the type of notification
- *
- * The notifications that is used for notification sent to the receiver
- * that registered notifications using backlight_register_notifier().
- */
-enum backlight_notification {
-	/**
-	 * @BACKLIGHT_REGISTERED: The backlight device is registered.
-	 */
-	BACKLIGHT_REGISTERED,
-
-	/**
-	 * @BACKLIGHT_UNREGISTERED: The backlight revice is unregistered.
-	 */
-	BACKLIGHT_UNREGISTERED,
 };
 
 /** enum backlight_scale - the type of scale used for brightness values
@@ -209,14 +189,18 @@ struct backlight_properties {
 	 * attribute: /sys/class/backlight/<backlight>/bl_power
 	 * When the power property is updated update_status() is called.
 	 *
-	 * The possible values are: (0: full on, 1 to 3: power saving
-	 * modes; 4: full off), see FB_BLANK_XXX.
+	 * The possible values are: (0: full on, 4: full off), see
+	 * BACKLIGHT_POWER constants.
 	 *
-	 * When the backlight device is enabled @power is set
-	 * to FB_BLANK_UNBLANK. When the backlight device is disabled
-	 * @power is set to FB_BLANK_POWERDOWN.
+	 * When the backlight device is enabled, @power is set to
+	 * BACKLIGHT_POWER_ON. When the backlight device is disabled,
+	 * @power is set to BACKLIGHT_POWER_OFF.
 	 */
 	int power;
+
+#define BACKLIGHT_POWER_ON		(0)
+#define BACKLIGHT_POWER_OFF		(4)
+#define BACKLIGHT_POWER_REDUCED		(1) // deprecated; don't use in new code
 
 	/**
 	 * @type: The type of backlight supported.
@@ -293,11 +277,6 @@ struct backlight_device {
 	const struct backlight_ops *ops;
 
 	/**
-	 * @fb_notif: The framebuffer notifier block
-	 */
-	struct notifier_block fb_notif;
-
-	/**
 	 * @entry: List entry of all registered backlight devices
 	 */
 	struct list_head entry;
@@ -308,15 +287,7 @@ struct backlight_device {
 	struct device dev;
 
 	/**
-	 * @fb_bl_on: The state of individual fbdev's.
-	 *
-	 * Multiple fbdev's may share one backlight device. The fb_bl_on
-	 * records the state of the individual fbdev.
-	 */
-	bool fb_bl_on[FB_MAX];
-
-	/**
-	 * @use_count: The number of uses of fb_bl_on.
+	 * @use_count: The number of unblanked displays.
 	 */
 	int use_count;
 };
@@ -346,7 +317,7 @@ static inline int backlight_enable(struct backlight_device *bd)
 	if (!bd)
 		return 0;
 
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	bd->props.state &= ~BL_CORE_FBBLANK;
 
 	return backlight_update_status(bd);
@@ -361,7 +332,7 @@ static inline int backlight_disable(struct backlight_device *bd)
 	if (!bd)
 		return 0;
 
-	bd->props.power = FB_BLANK_POWERDOWN;
+	bd->props.power = BACKLIGHT_POWER_OFF;
 	bd->props.state |= BL_CORE_FBBLANK;
 
 	return backlight_update_status(bd);
@@ -380,7 +351,7 @@ static inline int backlight_disable(struct backlight_device *bd)
  */
 static inline bool backlight_is_blank(const struct backlight_device *bd)
 {
-	return bd->props.power != FB_BLANK_UNBLANK ||
+	return bd->props.power != BACKLIGHT_POWER_ON ||
 	       bd->props.state & (BL_CORE_SUSPENDED | BL_CORE_FBBLANK);
 }
 
@@ -417,12 +388,26 @@ void devm_backlight_device_unregister(struct device *dev,
 				      struct backlight_device *bd);
 void backlight_force_update(struct backlight_device *bd,
 			    enum backlight_update_reason reason);
-int backlight_register_notifier(struct notifier_block *nb);
-int backlight_unregister_notifier(struct notifier_block *nb);
 struct backlight_device *backlight_device_get_by_name(const char *name);
 struct backlight_device *backlight_device_get_by_type(enum backlight_type type);
 int backlight_device_set_brightness(struct backlight_device *bd,
 				    unsigned long brightness);
+
+#if IS_REACHABLE(CONFIG_BACKLIGHT_CLASS_DEVICE)
+void backlight_notify_blank(struct backlight_device *bd,
+			    struct device *display_dev,
+			    bool fb_on, bool prev_fb_on);
+void backlight_notify_blank_all(struct device *display_dev,
+				bool fb_on, bool prev_fb_on);
+#else
+static inline void backlight_notify_blank(struct backlight_device *bd,
+					  struct device *display_dev,
+					  bool fb_on, bool prev_fb_on)
+{ }
+static inline void backlight_notify_blank_all(struct device *display_dev,
+					      bool fb_on, bool prev_fb_on)
+{ }
+#endif
 
 #define to_backlight_device(obj) container_of(obj, struct backlight_device, dev)
 

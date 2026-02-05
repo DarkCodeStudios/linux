@@ -6,6 +6,11 @@
  * (NOTE: these are not related to SCHED_IDLE batch scheduled
  *        tasks which are handled in sched/fair.c )
  */
+#include <linux/cpuidle.h>
+#include <linux/suspend.h>
+#include <linux/livepatch.h>
+#include "sched.h"
+#include "smp.h"
 
 /* Linker adds these: start and end of __cpuidle functions */
 extern char __cpuidle_text_start[], __cpuidle_text_end[];
@@ -47,7 +52,7 @@ static int __init cpu_idle_nopoll_setup(char *__unused)
 	return 1;
 }
 __setup("hlt", cpu_idle_nopoll_setup);
-#endif
+#endif /* CONFIG_GENERIC_IDLE_POLL_SETUP */
 
 static noinline int __cpuidle cpu_idle_poll(void)
 {
@@ -95,10 +100,10 @@ static inline void cond_tick_broadcast_exit(void)
 	if (static_branch_unlikely(&arch_needs_tick_broadcast))
 		tick_broadcast_exit();
 }
-#else
+#else /* !CONFIG_GENERIC_CLOCKEVENTS_BROADCAST_IDLE: */
 static inline void cond_tick_broadcast_enter(void) { }
 static inline void cond_tick_broadcast_exit(void) { }
-#endif
+#endif /* !CONFIG_GENERIC_CLOCKEVENTS_BROADCAST_IDLE */
 
 /**
  * default_idle_call - Default CPU idle routine.
@@ -126,12 +131,13 @@ void __cpuidle default_idle_call(void)
 }
 
 static int call_cpuidle_s2idle(struct cpuidle_driver *drv,
-			       struct cpuidle_device *dev)
+			       struct cpuidle_device *dev,
+			       u64 max_latency_ns)
 {
 	if (current_clr_polling_and_test())
 		return -EBUSY;
 
-	return cpuidle_enter_s2idle(drv, dev);
+	return cpuidle_enter_s2idle(drv, dev, max_latency_ns);
 }
 
 static int call_cpuidle(struct cpuidle_driver *drv, struct cpuidle_device *dev,
@@ -172,18 +178,12 @@ static void cpuidle_idle_call(void)
 
 	/*
 	 * Check if the idle task must be rescheduled. If it is the
-	 * case, exit the function after re-enabling the local irq.
+	 * case, exit the function after re-enabling the local IRQ.
 	 */
 	if (need_resched()) {
 		local_irq_enable();
 		return;
 	}
-
-	/*
-	 * The RCU framework needs to be told that we are entering an idle
-	 * section, so no more rcu read side critical sections and one more
-	 * step to the grace period
-	 */
 
 	if (cpuidle_not_available(drv, dev)) {
 		tick_nohz_idle_stop_tick();
@@ -206,12 +206,13 @@ static void cpuidle_idle_call(void)
 		u64 max_latency_ns;
 
 		if (idle_should_enter_s2idle()) {
+			max_latency_ns = cpu_wakeup_latency_qos_limit() *
+					 NSEC_PER_USEC;
 
-			entered_state = call_cpuidle_s2idle(drv, dev);
+			entered_state = call_cpuidle_s2idle(drv, dev,
+							    max_latency_ns);
 			if (entered_state > 0)
 				goto exit_idle;
-
-			max_latency_ns = U64_MAX;
 		} else {
 			max_latency_ns = dev->forced_idle_latency_limit_ns;
 		}
@@ -244,7 +245,7 @@ exit_idle:
 	__current_set_polling();
 
 	/*
-	 * It is up to the idle functions to reenable local interrupts
+	 * It is up to the idle functions to re-enable local interrupts
 	 */
 	if (WARN_ON_ONCE(irqs_disabled()))
 		local_irq_enable();
@@ -277,7 +278,6 @@ static void do_idle(void)
 	tick_nohz_idle_enter();
 
 	while (!need_resched()) {
-		rmb();
 
 		/*
 		 * Interrupts shouldn't be re-enabled from that point on until
@@ -320,7 +320,7 @@ static void do_idle(void)
 		rcu_nocb_flush_deferred_wakeup();
 
 		/*
-		 * In poll mode we reenable interrupts and spin. Also if we
+		 * In poll mode we re-enable interrupts and spin. Also if we
 		 * detected in the wakeup from idle path that the tick
 		 * broadcast device expired for us, we don't want to go deep
 		 * idle as we know that the IPI is going to arrive right away.
@@ -405,8 +405,8 @@ void play_idle_precise(u64 duration_ns, u64 latency_ns)
 	cpuidle_use_deepest_state(latency_ns);
 
 	it.done = 0;
-	hrtimer_init_on_stack(&it.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
-	it.timer.function = idle_inject_timer_fn;
+	hrtimer_setup_on_stack(&it.timer, idle_inject_timer_fn, CLOCK_MONOTONIC,
+			       HRTIMER_MODE_REL_HARD);
 	hrtimer_start(&it.timer, ns_to_ktime(duration_ns),
 		      HRTIMER_MODE_REL_PINNED_HARD);
 
@@ -434,7 +434,6 @@ void cpu_startup_entry(enum cpuhp_state state)
  * idle-task scheduling class.
  */
 
-#ifdef CONFIG_SMP
 static int
 select_task_rq_idle(struct task_struct *p, int cpu, int flags)
 {
@@ -446,7 +445,6 @@ balance_idle(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	return WARN_ON_ONCE(1);
 }
-#endif
 
 /*
  * Idle tasks are unconditionally rescheduled:
@@ -456,43 +454,46 @@ static void wakeup_preempt_idle(struct rq *rq, struct task_struct *p, int flags)
 	resched_curr(rq);
 }
 
-static void put_prev_task_idle(struct rq *rq, struct task_struct *prev)
+static void update_curr_idle(struct rq *rq);
+
+static void put_prev_task_idle(struct rq *rq, struct task_struct *prev, struct task_struct *next)
 {
+	update_curr_idle(rq);
+	scx_update_idle(rq, false, true);
 }
 
 static void set_next_task_idle(struct rq *rq, struct task_struct *next, bool first)
 {
 	update_idle_core(rq);
+	scx_update_idle(rq, true, true);
 	schedstat_inc(rq->sched_goidle);
+	next->se.exec_start = rq_clock_task(rq);
+
+	/*
+	 * rq is about to be idle, check if we need to update the
+	 * lost_idle_time of clock_pelt
+	 */
+	update_idle_rq_clock_pelt(rq);
 }
 
-#ifdef CONFIG_SMP
-static struct task_struct *pick_task_idle(struct rq *rq)
+struct task_struct *pick_task_idle(struct rq *rq, struct rq_flags *rf)
 {
+	scx_update_idle(rq, true, false);
 	return rq->idle;
-}
-#endif
-
-struct task_struct *pick_next_task_idle(struct rq *rq)
-{
-	struct task_struct *next = rq->idle;
-
-	set_next_task_idle(rq, next, true);
-
-	return next;
 }
 
 /*
  * It is not legal to sleep in the idle task - print a warning
  * message if some code attempts to do it:
  */
-static void
+static bool
 dequeue_task_idle(struct rq *rq, struct task_struct *p, int flags)
 {
 	raw_spin_rq_unlock_irq(rq);
 	printk(KERN_ERR "bad: scheduling from the idle thread!\n");
 	dump_stack();
 	raw_spin_rq_lock_irq(rq);
+	return true;
 }
 
 /*
@@ -505,27 +506,44 @@ dequeue_task_idle(struct rq *rq, struct task_struct *p, int flags)
  */
 static void task_tick_idle(struct rq *rq, struct task_struct *curr, int queued)
 {
+	update_curr_idle(rq);
 }
 
-static void switched_to_idle(struct rq *rq, struct task_struct *p)
+static void switching_to_idle(struct rq *rq, struct task_struct *p)
 {
 	BUG();
 }
 
 static void
-prio_changed_idle(struct rq *rq, struct task_struct *p, int oldprio)
+prio_changed_idle(struct rq *rq, struct task_struct *p, u64 oldprio)
 {
+	if (p->prio == oldprio)
+		return;
+
 	BUG();
 }
 
 static void update_curr_idle(struct rq *rq)
 {
+	struct sched_entity *se = &rq->idle->se;
+	u64 now = rq_clock_task(rq);
+	s64 delta_exec;
+
+	delta_exec = now - se->exec_start;
+	if (unlikely(delta_exec <= 0))
+		return;
+
+	se->exec_start = now;
+
+	dl_server_update_idle(&rq->fair_server, delta_exec);
 }
 
 /*
  * Simple, special scheduling class for the per-CPU idle tasks:
  */
 DEFINE_SCHED_CLASS(idle) = {
+
+	.queue_mask		= 0,
 
 	/* no enqueue/yield_task for idle tasks */
 
@@ -534,20 +552,17 @@ DEFINE_SCHED_CLASS(idle) = {
 
 	.wakeup_preempt		= wakeup_preempt_idle,
 
-	.pick_next_task		= pick_next_task_idle,
+	.pick_task		= pick_task_idle,
 	.put_prev_task		= put_prev_task_idle,
 	.set_next_task          = set_next_task_idle,
 
-#ifdef CONFIG_SMP
 	.balance		= balance_idle,
-	.pick_task		= pick_task_idle,
 	.select_task_rq		= select_task_rq_idle,
 	.set_cpus_allowed	= set_cpus_allowed_common,
-#endif
 
 	.task_tick		= task_tick_idle,
 
 	.prio_changed		= prio_changed_idle,
-	.switched_to		= switched_to_idle,
+	.switching_to		= switching_to_idle,
 	.update_curr		= update_curr_idle,
 };

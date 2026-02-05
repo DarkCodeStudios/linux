@@ -23,20 +23,11 @@
  *
  */
 
-/**
- * DOC: overview
- *
- * Display Input Output (DIO), is the display input and output unit in DCN. It
- * includes output encoders to support different display output, like
- * DisplayPort, HDMI, DVI interface, and others. It also includes the control
- * and status channels for these interfaces.
- */
-
 #ifndef __LINK_HWSS_DIO_H__
 #define __LINK_HWSS_DIO_H__
 
 #include "link_hwss.h"
-#include "link.h"
+#include "link_service.h"
 
 const struct link_hwss *get_dio_link_hwss(void);
 bool can_use_dio_link_hwss(const struct dc_link *link,

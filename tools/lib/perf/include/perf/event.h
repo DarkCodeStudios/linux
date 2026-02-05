@@ -77,6 +77,12 @@ struct perf_record_lost_samples {
 	__u64			 lost;
 };
 
+#define MAX_ID_HDR_ENTRIES  6
+struct perf_record_lost_samples_and_ids {
+	struct perf_record_lost_samples lost;
+	__u64 sample_ids[MAX_ID_HDR_ENTRIES];
+};
+
 /*
  * PERF_FORMAT_ENABLED | PERF_FORMAT_RUNNING | PERF_FORMAT_ID | PERF_FORMAT_LOST
  */
@@ -143,6 +149,18 @@ struct perf_record_switch {
 	struct perf_event_header header;
 	__u32			 next_prev_pid;
 	__u32			 next_prev_tid;
+};
+
+struct perf_record_callchain_deferred {
+	struct perf_event_header header;
+	/*
+	 * This is to match kernel and (deferred) user stacks together.
+	 * The kernel part will be in the sample callchain array after
+	 * the PERF_CONTEXT_USER_DEFERRED entry.
+	 */
+	__u64			 cookie;
+	__u64			 nr;
+	__u64			 ips[];
 };
 
 struct perf_record_header_attr {
@@ -285,6 +303,7 @@ struct perf_record_header_event_type {
 struct perf_record_header_tracing_data {
 	struct perf_event_header header;
 	__u32			 size;
+	__u32			 pad;
 };
 
 #define PERF_RECORD_MISC_BUILD_ID_SIZE (1 << 15)
@@ -451,6 +470,32 @@ struct perf_record_compressed {
 	char			 data[];
 };
 
+/*
+ * `header.size` includes the padding we are going to add while writing the record.
+ * `data_size` only includes the size of `data[]` itself.
+ */
+struct perf_record_compressed2 {
+	struct perf_event_header header;
+	__u64			 data_size;
+	char			 data[];
+};
+
+#define BPF_METADATA_KEY_LEN   64
+#define BPF_METADATA_VALUE_LEN 256
+#define BPF_PROG_NAME_LEN      KSYM_NAME_LEN
+
+struct perf_record_bpf_metadata_entry {
+	char key[BPF_METADATA_KEY_LEN];
+	char value[BPF_METADATA_VALUE_LEN];
+};
+
+struct perf_record_bpf_metadata {
+	struct perf_event_header	      header;
+	char				      prog_name[BPF_PROG_NAME_LEN];
+	__u64				      nr_entries;
+	struct perf_record_bpf_metadata_entry entries[];
+};
+
 enum perf_user_event_type { /* above any possible kernel type */
 	PERF_RECORD_USER_TYPE_START		= 64,
 	PERF_RECORD_HEADER_ATTR			= 64,
@@ -472,6 +517,8 @@ enum perf_user_event_type { /* above any possible kernel type */
 	PERF_RECORD_HEADER_FEATURE		= 80,
 	PERF_RECORD_COMPRESSED			= 81,
 	PERF_RECORD_FINISHED_INIT		= 82,
+	PERF_RECORD_COMPRESSED2			= 83,
+	PERF_RECORD_BPF_METADATA		= 84,
 	PERF_RECORD_HEADER_MAX
 };
 
@@ -488,6 +535,7 @@ union perf_event {
 	struct perf_record_read			read;
 	struct perf_record_throttle		throttle;
 	struct perf_record_sample		sample;
+	struct perf_record_callchain_deferred	callchain_deferred;
 	struct perf_record_bpf_event		bpf;
 	struct perf_record_ksymbol		ksymbol;
 	struct perf_record_text_poke_event	text_poke;
@@ -512,6 +560,8 @@ union perf_event {
 	struct perf_record_time_conv		time_conv;
 	struct perf_record_header_feature	feat;
 	struct perf_record_compressed		pack;
+	struct perf_record_compressed2		pack2;
+	struct perf_record_bpf_metadata		bpf_metadata;
 };
 
 #endif /* __LIBPERF_EVENT_H */

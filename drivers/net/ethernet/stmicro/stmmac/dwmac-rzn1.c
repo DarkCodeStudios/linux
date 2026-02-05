@@ -39,6 +39,12 @@ static void rzn1_dwmac_pcs_exit(struct stmmac_priv *priv)
 		miic_destroy(priv->hw->phylink_pcs);
 }
 
+static struct phylink_pcs *rzn1_dwmac_select_pcs(struct stmmac_priv *priv,
+						 phy_interface_t interface)
+{
+	return priv->hw->phylink_pcs;
+}
+
 static int rzn1_dwmac_probe(struct platform_device *pdev)
 {
 	struct plat_stmmacenet_data *plat_dat;
@@ -57,6 +63,7 @@ static int rzn1_dwmac_probe(struct platform_device *pdev)
 	plat_dat->bsp_priv = plat_dat;
 	plat_dat->pcs_init = rzn1_dwmac_pcs_init;
 	plat_dat->pcs_exit = rzn1_dwmac_pcs_exit;
+	plat_dat->select_pcs = rzn1_dwmac_select_pcs;
 
 	ret = stmmac_dvr_probe(dev, plat_dat, &stmmac_res);
 	if (ret)
@@ -73,7 +80,7 @@ MODULE_DEVICE_TABLE(of, rzn1_dwmac_match);
 
 static struct platform_driver rzn1_dwmac_driver = {
 	.probe  = rzn1_dwmac_probe,
-	.remove_new = stmmac_pltfr_remove,
+	.remove = stmmac_pltfr_remove,
 	.driver = {
 		.name           = "rzn1-dwmac",
 		.of_match_table = rzn1_dwmac_match,

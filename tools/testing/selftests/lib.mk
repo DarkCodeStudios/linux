@@ -38,6 +38,14 @@ else
 CLANG_FLAGS     += --target=$(notdir $(CROSS_COMPILE:%-=%))
 endif # CROSS_COMPILE
 
+# gcc defaults to silence (off) for the following warnings, but clang defaults
+# to the opposite. The warnings are not useful for the kernel itself, which is
+# why they have remained disabled in gcc for the main kernel build. And it is
+# only due to including kernel data structures in the selftests, that we get the
+# warnings from clang. Therefore, disable the warnings for clang builds.
+CFLAGS += -Wno-address-of-packed-member
+CFLAGS += -Wno-gnu-variable-sized-type-not-at-end
+
 CC := $(CLANG) $(CLANG_FLAGS) -fintegrated-as
 else
 CC := $(CROSS_COMPILE)gcc
@@ -188,6 +196,12 @@ endef
 clean: $(if $(TEST_GEN_MODS_DIR),clean_mods_dir)
 	$(CLEAN)
 
+# Build with _GNU_SOURCE by default
+CFLAGS += -D_GNU_SOURCE=
+
+# Additional include paths needed by kselftest.h and local headers
+CFLAGS += -I${top_srcdir}/tools/testing/selftests
+
 # Enables to extend CFLAGS and LDFLAGS from command line, e.g.
 # make USERCFLAGS=-Werror USERLDFLAGS=-static
 CFLAGS += $(USERCFLAGS)
@@ -217,4 +231,10 @@ $(OUTPUT)/%:%.S
 	$(LINK.S) $^ $(LDLIBS) -o $@
 endif
 
-.PHONY: run_tests all clean install emit_tests gen_mods_dir clean_mods_dir
+# Extract the expected header directory
+khdr_output := $(patsubst %/usr/include,%,$(filter %/usr/include,$(KHDR_INCLUDES)))
+
+headers:
+	$(Q)$(MAKE) -f $(top_srcdir)/Makefile -C $(khdr_output) headers
+
+.PHONY: run_tests all clean install emit_tests gen_mods_dir clean_mods_dir headers

@@ -1,6 +1,8 @@
 #PANIC
 #PANIC_STOP_IRQOFF Crashes entire system
+#PANIC_IN_HARDIRQ Crashes entire system
 BUG kernel BUG at
+#BUG_IN_HARDIRQ Crashes entire system
 WARNING WARNING:
 WARNING_MESSAGE message trigger
 EXCEPTION
@@ -31,6 +33,7 @@ SLAB_FREE_CROSS
 SLAB_FREE_PAGE
 #SOFTLOCKUP Hangs the system
 #HARDLOCKUP Hangs the system
+#SMP_CALL_LOCKUP Hangs the system
 #SPINLOCKUP Hangs the system
 #HUNG_TASK Hangs the system
 EXEC_DATA

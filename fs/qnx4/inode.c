@@ -290,7 +290,7 @@ struct inode *qnx4_iget(struct super_block *sb, unsigned long ino)
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	qnx4_inode = qnx4_raw_inode(inode);
@@ -430,5 +430,6 @@ static void __exit exit_qnx4_fs(void)
 
 module_init(init_qnx4_fs)
 module_exit(exit_qnx4_fs)
+MODULE_DESCRIPTION("QNX4 file system");
 MODULE_LICENSE("GPL");
 

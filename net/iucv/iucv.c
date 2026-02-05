@@ -20,10 +20,10 @@
  *    CP Programming Service, IBM document # SC24-5760
  */
 
-#define KMSG_COMPONENT "iucv"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "iucv: " fmt
 
 #include <linux/kernel_stat.h>
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/spinlock.h>
@@ -39,6 +39,7 @@
 #include <linux/reboot.h>
 #include <net/iucv/iucv.h>
 #include <linux/atomic.h>
+#include <asm/machine.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -62,7 +63,7 @@
 #define IUCV_IPNORPY	0x10
 #define IUCV_IPALL	0x80
 
-static int iucv_bus_match(struct device *dev, struct device_driver *drv)
+static int iucv_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	return 0;
 }
@@ -86,13 +87,15 @@ struct device *iucv_alloc_device(const struct attribute_group **attrs,
 {
 	struct device *dev;
 	va_list vargs;
+	char buf[20];
 	int rc;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		goto out_error;
 	va_start(vargs, fmt);
-	rc = dev_set_name(dev, fmt, vargs);
+	vscnprintf(buf, sizeof(buf), fmt, vargs);
+	rc = dev_set_name(dev, "%s", buf);
 	va_end(vargs);
 	if (rc)
 		goto out_error;
@@ -1863,7 +1866,7 @@ static int __init iucv_init(void)
 {
 	int rc;
 
-	if (!MACHINE_IS_VM) {
+	if (!machine_is_vm()) {
 		rc = -EPROTONOSUPPORT;
 		goto out;
 	}

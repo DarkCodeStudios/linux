@@ -31,6 +31,15 @@ kselftest runs as a userspace process.  Tests that can be written/run in
 userspace may wish to use the `Test Harness`_.  Tests that need to be
 run in kernel space may wish to use a `Test Module`_.
 
+Documentation on the tests
+==========================
+
+For documentation on the kselftests themselves, see:
+
+.. toctree::
+
+   testing-devices
+
 Running the selftests (hotplug tests are run in limited mode)
 =============================================================
 
@@ -228,6 +237,13 @@ In general, the rules for selftests are
  * Don't cause the top-level "make run_tests" to fail if your feature is
    unconfigured.
 
+ * The output of tests must conform to the TAP standard to ensure high
+   testing quality and to capture failures/errors with specific details.
+   The kselftest.h and kselftest_harness.h headers provide wrappers for
+   outputting test results. These wrappers should be used for pass,
+   fail, exit, and skip messages. CI systems can easily parse TAP output
+   messages to detect test results.
+
 Contributing new tests (details)
 ================================
 
@@ -331,7 +347,7 @@ kselftest.  We use kselftests for lib/ as an example.
 1. Create the test module
 
 2. Create the test script that will run (load/unload) the module
-   e.g. ``tools/testing/selftests/lib/printf.sh``
+   e.g. ``tools/testing/selftests/lib/bitmap.sh``
 
 3. Add line to config file e.g. ``tools/testing/selftests/lib/config``
 

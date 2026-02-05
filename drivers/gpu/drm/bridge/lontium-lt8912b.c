@@ -408,7 +408,7 @@ lt8912_connector_detect(struct drm_connector *connector, bool force)
 	struct lt8912 *lt = connector_to_lt8912(connector);
 
 	if (lt->hdmi_port->ops & DRM_BRIDGE_OP_DETECT)
-		return drm_bridge_detect(lt->hdmi_port);
+		return drm_bridge_detect(lt->hdmi_port, connector);
 
 	return lt8912_check_cable_status(lt);
 }
@@ -421,22 +421,6 @@ static const struct drm_connector_funcs lt8912_connector_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
-
-static enum drm_mode_status
-lt8912_connector_mode_valid(struct drm_connector *connector,
-			    struct drm_display_mode *mode)
-{
-	if (mode->clock > 150000)
-		return MODE_CLOCK_HIGH;
-
-	if (mode->hdisplay > 1920)
-		return MODE_BAD_HVALUE;
-
-	if (mode->vdisplay > 1080)
-		return MODE_BAD_VVALUE;
-
-	return MODE_OK;
-}
 
 static int lt8912_connector_get_modes(struct drm_connector *connector)
 {
@@ -463,7 +447,6 @@ static int lt8912_connector_get_modes(struct drm_connector *connector)
 
 static const struct drm_connector_helper_funcs lt8912_connector_helper_funcs = {
 	.get_modes = lt8912_connector_get_modes,
-	.mode_valid = lt8912_connector_mode_valid,
 };
 
 static void lt8912_bridge_mode_set(struct drm_bridge *bridge,
@@ -560,12 +543,13 @@ exit:
 }
 
 static int lt8912_bridge_attach(struct drm_bridge *bridge,
+				struct drm_encoder *encoder,
 				enum drm_bridge_attach_flags flags)
 {
 	struct lt8912 *lt = bridge_to_lt8912(bridge);
 	int ret;
 
-	ret = drm_bridge_attach(bridge->encoder, lt->hdmi_port, bridge,
+	ret = drm_bridge_attach(encoder, lt->hdmi_port, bridge,
 				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret < 0) {
 		dev_err(lt->dev, "Failed to attach next bridge (%d)\n", ret);
@@ -605,13 +589,30 @@ static void lt8912_bridge_detach(struct drm_bridge *bridge)
 		drm_bridge_hpd_disable(lt->hdmi_port);
 }
 
+static enum drm_mode_status
+lt8912_bridge_mode_valid(struct drm_bridge *bridge,
+			 const struct drm_display_info *info,
+			 const struct drm_display_mode *mode)
+{
+	if (mode->clock > 150000)
+		return MODE_CLOCK_HIGH;
+
+	if (mode->hdisplay > 1920)
+		return MODE_BAD_HVALUE;
+
+	if (mode->vdisplay > 1080)
+		return MODE_BAD_VVALUE;
+
+	return MODE_OK;
+}
+
 static enum drm_connector_status
-lt8912_bridge_detect(struct drm_bridge *bridge)
+lt8912_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct lt8912 *lt = bridge_to_lt8912(bridge);
 
 	if (lt->hdmi_port->ops & DRM_BRIDGE_OP_DETECT)
-		return drm_bridge_detect(lt->hdmi_port);
+		return drm_bridge_detect(lt->hdmi_port, connector);
 
 	return lt8912_check_cable_status(lt);
 }
@@ -635,6 +636,7 @@ static const struct drm_edid *lt8912_bridge_edid_read(struct drm_bridge *bridge,
 static const struct drm_bridge_funcs lt8912_bridge_funcs = {
 	.attach = lt8912_bridge_attach,
 	.detach = lt8912_bridge_detach,
+	.mode_valid = lt8912_bridge_mode_valid,
 	.mode_set = lt8912_bridge_mode_set,
 	.enable = lt8912_bridge_enable,
 	.detect = lt8912_bridge_detect,
@@ -759,9 +761,10 @@ static int lt8912_probe(struct i2c_client *client)
 	int ret = 0;
 	struct device *dev = &client->dev;
 
-	lt = devm_kzalloc(dev, sizeof(struct lt8912), GFP_KERNEL);
-	if (!lt)
-		return -ENOMEM;
+	lt = devm_drm_bridge_alloc(dev, struct lt8912, bridge,
+				   &lt8912_bridge_funcs);
+	if (IS_ERR(lt))
+		return PTR_ERR(lt);
 
 	lt->dev = dev;
 	lt->i2c_client[0] = client;
@@ -776,7 +779,6 @@ static int lt8912_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, lt);
 
-	lt->bridge.funcs = &lt8912_bridge_funcs;
 	lt->bridge.of_node = dev->of_node;
 	lt->bridge.ops = (DRM_BRIDGE_OP_EDID |
 			  DRM_BRIDGE_OP_DETECT);
@@ -814,8 +816,8 @@ static const struct of_device_id lt8912_dt_match[] = {
 MODULE_DEVICE_TABLE(of, lt8912_dt_match);
 
 static const struct i2c_device_id lt8912_id[] = {
-	{"lt8912", 0},
-	{},
+	{ "lt8912" },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, lt8912_id);
 

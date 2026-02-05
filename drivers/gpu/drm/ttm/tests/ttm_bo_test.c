@@ -18,6 +18,12 @@
 
 #define BO_SIZE		SZ_8K
 
+#ifdef CONFIG_PREEMPT_RT
+#define ww_mutex_base_lock(b)			rt_mutex_lock(b)
+#else
+#define ww_mutex_base_lock(b)			mutex_lock(b)
+#endif
+
 struct ttm_bo_test_case {
 	const char *description;
 	bool interruptible;
@@ -56,7 +62,7 @@ static void ttm_bo_reserve_optimistic_no_ticket(struct kunit *test)
 	struct ttm_buffer_object *bo;
 	int err;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	err = ttm_bo_reserve(bo, params->interruptible, params->no_wait, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -71,7 +77,7 @@ static void ttm_bo_reserve_locked_no_sleep(struct kunit *test)
 	bool no_wait = true;
 	int err;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	/* Let's lock it beforehand */
 	dma_resv_lock(bo->base.resv, NULL);
@@ -92,7 +98,7 @@ static void ttm_bo_reserve_no_wait_ticket(struct kunit *test)
 
 	ww_acquire_init(&ctx, &reservation_ww_class);
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	err = ttm_bo_reserve(bo, interruptible, no_wait, &ctx);
 	KUNIT_ASSERT_EQ(test, err, -EBUSY);
@@ -110,7 +116,7 @@ static void ttm_bo_reserve_double_resv(struct kunit *test)
 
 	ww_acquire_init(&ctx, &reservation_ww_class);
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	err = ttm_bo_reserve(bo, interruptible, no_wait, &ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -138,11 +144,11 @@ static void ttm_bo_reserve_deadlock(struct kunit *test)
 	bool no_wait = false;
 	int err;
 
-	bo1 = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
-	bo2 = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo1 = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
+	bo2 = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	ww_acquire_init(&ctx1, &reservation_ww_class);
-	mutex_lock(&bo2->base.resv->lock.base);
+	ww_mutex_base_lock(&bo2->base.resv->lock.base);
 
 	/* The deadlock will be caught by WW mutex, don't warn about it */
 	lock_release(&bo2->base.resv->lock.base.dep_map, 1);
@@ -169,7 +175,7 @@ struct signal_timer {
 
 static void signal_for_ttm_bo_reserve(struct timer_list *t)
 {
-	struct signal_timer *s_timer = from_timer(s_timer, t, timer);
+	struct signal_timer *s_timer = timer_container_of(s_timer, t, timer);
 	struct task_struct *task = s_timer->ctx->task;
 
 	do_send_sig_info(SIGTERM, SEND_SIG_PRIV, task, PIDTYPE_PID);
@@ -195,7 +201,7 @@ static int threaded_ttm_bo_reserve(void *arg)
 	err = ttm_bo_reserve(bo, interruptible, no_wait, &ctx);
 
 	timer_delete_sync(&s_timer.timer);
-	destroy_timer_on_stack(&s_timer.timer);
+	timer_destroy_on_stack(&s_timer.timer);
 
 	ww_acquire_fini(&ctx);
 
@@ -208,7 +214,7 @@ static void ttm_bo_reserve_interrupted(struct kunit *test)
 	struct task_struct *task;
 	int err;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	task = kthread_create(threaded_ttm_bo_reserve, bo, "ttm-bo-reserve");
 
@@ -237,7 +243,7 @@ static void ttm_bo_unreserve_basic(struct kunit *test)
 	struct ttm_place *place;
 	struct ttm_resource_manager *man;
 	unsigned int bo_prio = TTM_MAX_BO_PRIORITY - 1;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	u32 mem_type = TTM_PL_SYSTEM;
 	int err;
 
 	place = ttm_place_kunit_init(test, mem_type, 0);
@@ -245,27 +251,27 @@ static void ttm_bo_unreserve_basic(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 	bo->priority = bo_prio;
 
-	err = ttm_resource_alloc(bo, place, &res1);
+	err = ttm_resource_alloc(bo, place, &res1, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 
 	bo->resource = res1;
 
 	/* Add a dummy resource to populate LRU */
-	ttm_resource_alloc(bo, place, &res2);
+	ttm_resource_alloc(bo, place, &res2, NULL);
 
 	dma_resv_lock(bo->base.resv, NULL);
 	ttm_bo_unreserve(bo);
 
 	man = ttm_manager_type(priv->ttm_dev, mem_type);
 	KUNIT_ASSERT_EQ(test,
-			list_is_last(&res1->lru, &man->lru[bo->priority]), 1);
+			list_is_last(&res1->lru.link, &man->lru[bo->priority]), 1);
 
 	ttm_resource_free(bo, &res2);
 	ttm_resource_free(bo, &res1);
@@ -278,35 +284,35 @@ static void ttm_bo_unreserve_pinned(struct kunit *test)
 	struct ttm_device *ttm_dev;
 	struct ttm_resource *res1, *res2;
 	struct ttm_place *place;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	u32 mem_type = TTM_PL_SYSTEM;
 	int err;
 
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 	place = ttm_place_kunit_init(test, mem_type, 0);
 
 	dma_resv_lock(bo->base.resv, NULL);
 	ttm_bo_pin(bo);
 
-	err = ttm_resource_alloc(bo, place, &res1);
+	err = ttm_resource_alloc(bo, place, &res1, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo->resource = res1;
 
 	/* Add a dummy resource to the pinned list */
-	err = ttm_resource_alloc(bo, place, &res2);
+	err = ttm_resource_alloc(bo, place, &res2, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	KUNIT_ASSERT_EQ(test,
-			list_is_last(&res2->lru, &priv->ttm_dev->pinned), 1);
+			list_is_last(&res2->lru.link, &priv->ttm_dev->unevictable), 1);
 
 	ttm_bo_unreserve(bo);
 	KUNIT_ASSERT_EQ(test,
-			list_is_last(&res1->lru, &priv->ttm_dev->pinned), 1);
+			list_is_last(&res1->lru.link, &priv->ttm_dev->unevictable), 1);
 
 	ttm_resource_free(bo, &res1);
 	ttm_resource_free(bo, &res2);
@@ -321,7 +327,8 @@ static void ttm_bo_unreserve_bulk(struct kunit *test)
 	struct ttm_resource *res1, *res2;
 	struct ttm_device *ttm_dev;
 	struct ttm_place *place;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	struct dma_resv *resv;
+	u32 mem_type = TTM_PL_SYSTEM;
 	unsigned int bo_priority = 0;
 	int err;
 
@@ -332,18 +339,23 @@ static void ttm_bo_unreserve_bulk(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	resv = kunit_kzalloc(test, sizeof(*resv), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, resv);
+
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo1 = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
-	bo2 = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	dma_resv_init(resv);
+
+	bo1 = ttm_bo_kunit_init(test, test->priv, BO_SIZE, resv);
+	bo2 = ttm_bo_kunit_init(test, test->priv, BO_SIZE, resv);
 
 	dma_resv_lock(bo1->base.resv, NULL);
 	ttm_bo_set_bulk_move(bo1, &lru_bulk_move);
 	dma_resv_unlock(bo1->base.resv);
 
-	err = ttm_resource_alloc(bo1, place, &res1);
+	err = ttm_resource_alloc(bo1, place, &res1, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo1->resource = res1;
 
@@ -351,7 +363,7 @@ static void ttm_bo_unreserve_bulk(struct kunit *test)
 	ttm_bo_set_bulk_move(bo2, &lru_bulk_move);
 	dma_resv_unlock(bo2->base.resv);
 
-	err = ttm_resource_alloc(bo2, place, &res2);
+	err = ttm_resource_alloc(bo2, place, &res2, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo2->resource = res2;
 
@@ -363,16 +375,18 @@ static void ttm_bo_unreserve_bulk(struct kunit *test)
 
 	ttm_resource_free(bo1, &res1);
 	ttm_resource_free(bo2, &res2);
+
+	dma_resv_fini(resv);
 }
 
-static void ttm_bo_put_basic(struct kunit *test)
+static void ttm_bo_fini_basic(struct kunit *test)
 {
 	struct ttm_test_devices *priv = test->priv;
 	struct ttm_buffer_object *bo;
 	struct ttm_resource *res;
 	struct ttm_device *ttm_dev;
 	struct ttm_place *place;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	u32 mem_type = TTM_PL_SYSTEM;
 	int err;
 
 	place = ttm_place_kunit_init(test, mem_type, 0);
@@ -380,14 +394,14 @@ static void ttm_bo_put_basic(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 	bo->type = ttm_bo_type_device;
 
-	err = ttm_resource_alloc(bo, place, &res);
+	err = ttm_resource_alloc(bo, place, &res, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo->resource = res;
 
@@ -396,7 +410,7 @@ static void ttm_bo_put_basic(struct kunit *test)
 	dma_resv_unlock(bo->base.resv);
 	KUNIT_EXPECT_EQ(test, err, 0);
 
-	ttm_bo_put(bo);
+	ttm_bo_fini(bo);
 }
 
 static const char *mock_name(struct dma_fence *f)
@@ -409,7 +423,7 @@ static const struct dma_fence_ops mock_fence_ops = {
 	.get_timeline_name = mock_name,
 };
 
-static void ttm_bo_put_shared_resv(struct kunit *test)
+static void ttm_bo_fini_shared_resv(struct kunit *test)
 {
 	struct ttm_test_devices *priv = test->priv;
 	struct ttm_buffer_object *bo;
@@ -423,7 +437,7 @@ static void ttm_bo_put_shared_resv(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
@@ -445,11 +459,11 @@ static void ttm_bo_put_shared_resv(struct kunit *test)
 
 	dma_fence_signal(fence);
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 	bo->type = ttm_bo_type_device;
 	bo->base.resv = external_resv;
 
-	ttm_bo_put(bo);
+	ttm_bo_fini(bo);
 }
 
 static void ttm_bo_pin_basic(struct kunit *test)
@@ -463,11 +477,11 @@ static void ttm_bo_pin_basic(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
 	for (int i = 0; i < no_pins; i++) {
 		dma_resv_lock(bo->base.resv, NULL);
@@ -487,7 +501,7 @@ static void ttm_bo_pin_unpin_resource(struct kunit *test)
 	struct ttm_resource *res;
 	struct ttm_device *ttm_dev;
 	struct ttm_place *place;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	u32 mem_type = TTM_PL_SYSTEM;
 	unsigned int bo_priority = 0;
 	int err;
 
@@ -498,13 +512,13 @@ static void ttm_bo_pin_unpin_resource(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
-	err = ttm_resource_alloc(bo, place, &res);
+	err = ttm_resource_alloc(bo, place, &res, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo->resource = res;
 
@@ -538,7 +552,7 @@ static void ttm_bo_multiple_pin_one_unpin(struct kunit *test)
 	struct ttm_resource *res;
 	struct ttm_device *ttm_dev;
 	struct ttm_place *place;
-	uint32_t mem_type = TTM_PL_SYSTEM;
+	u32 mem_type = TTM_PL_SYSTEM;
 	unsigned int bo_priority = 0;
 	int err;
 
@@ -549,13 +563,13 @@ static void ttm_bo_multiple_pin_one_unpin(struct kunit *test)
 	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
 
-	err = ttm_device_kunit_init(priv, ttm_dev, false, false);
+	err = ttm_device_kunit_init(priv, ttm_dev, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	priv->ttm_dev = ttm_dev;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE);
+	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
 
-	err = ttm_resource_alloc(bo, place, &res);
+	err = ttm_resource_alloc(bo, place, &res, NULL);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	bo->resource = res;
 
@@ -602,8 +616,8 @@ static struct kunit_case ttm_bo_test_cases[] = {
 	KUNIT_CASE(ttm_bo_unreserve_basic),
 	KUNIT_CASE(ttm_bo_unreserve_pinned),
 	KUNIT_CASE(ttm_bo_unreserve_bulk),
-	KUNIT_CASE(ttm_bo_put_basic),
-	KUNIT_CASE(ttm_bo_put_shared_resv),
+	KUNIT_CASE(ttm_bo_fini_basic),
+	KUNIT_CASE(ttm_bo_fini_shared_resv),
 	KUNIT_CASE(ttm_bo_pin_basic),
 	KUNIT_CASE(ttm_bo_pin_unpin_resource),
 	KUNIT_CASE(ttm_bo_multiple_pin_one_unpin),
@@ -619,4 +633,5 @@ static struct kunit_suite ttm_bo_test_suite = {
 
 kunit_test_suites(&ttm_bo_test_suite);
 
-MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("KUnit tests for ttm_bo APIs");
+MODULE_LICENSE("GPL and additional rights");

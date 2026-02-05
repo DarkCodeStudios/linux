@@ -133,7 +133,15 @@ static void dwc2_set_rk_params(struct dwc2_hsotg *hsotg)
 	p->no_clock_gating = true;
 }
 
-static void dwc2_set_ltq_params(struct dwc2_hsotg *hsotg)
+static void dwc2_set_ltq_danube_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+
+	p->otg_caps.hnp_support = false;
+	p->otg_caps.srp_support = false;
+}
+
+static void dwc2_set_ltq_ase_params(struct dwc2_hsotg *hsotg)
 {
 	struct dwc2_core_params *p = &hsotg->params;
 
@@ -142,10 +150,19 @@ static void dwc2_set_ltq_params(struct dwc2_hsotg *hsotg)
 	p->host_rx_fifo_size = 288;
 	p->host_nperio_tx_fifo_size = 128;
 	p->host_perio_tx_fifo_size = 96;
-	p->max_transfer_size = 65535;
-	p->max_packet_count = 511;
 	p->ahbcfg = GAHBCFG_HBSTLEN_INCR16 <<
 		GAHBCFG_HBSTLEN_SHIFT;
+}
+
+static void dwc2_set_ltq_xrx200_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+
+	p->otg_caps.hnp_support = false;
+	p->otg_caps.srp_support = false;
+	p->host_rx_fifo_size = 288;
+	p->host_nperio_tx_fifo_size = 128;
+	p->host_perio_tx_fifo_size = 136;
 }
 
 static void dwc2_set_amlogic_params(struct dwc2_hsotg *hsotg)
@@ -297,8 +314,11 @@ const struct of_device_id dwc2_of_match_table[] = {
 	{ .compatible = "ingenic,x1830-otg", .data = dwc2_set_x1600_params },
 	{ .compatible = "ingenic,x2000-otg", .data = dwc2_set_x2000_params },
 	{ .compatible = "rockchip,rk3066-usb", .data = dwc2_set_rk_params },
-	{ .compatible = "lantiq,arx100-usb", .data = dwc2_set_ltq_params },
-	{ .compatible = "lantiq,xrx200-usb", .data = dwc2_set_ltq_params },
+	{ .compatible = "lantiq,danube-usb", .data = &dwc2_set_ltq_danube_params },
+	{ .compatible = "lantiq,ase-usb", .data = &dwc2_set_ltq_ase_params },
+	{ .compatible = "lantiq,arx100-usb", .data = &dwc2_set_ltq_ase_params },
+	{ .compatible = "lantiq,xrx200-usb", .data = &dwc2_set_ltq_xrx200_params },
+	{ .compatible = "lantiq,xrx300-usb", .data = &dwc2_set_ltq_xrx200_params },
 	{ .compatible = "snps,dwc2" },
 	{ .compatible = "samsung,s3c6400-hsotg",
 	  .data = dwc2_set_s3c6400_params },
@@ -314,7 +334,7 @@ const struct of_device_id dwc2_of_match_table[] = {
 	  .data = dwc2_set_amlogic_a1_params },
 	{ .compatible = "amcc,dwc-otg", .data = dwc2_set_amcc_params },
 	{ .compatible = "apm,apm82181-dwc-otg", .data = dwc2_set_amcc_params },
-	{ .compatible = "sophgo,cv1800-usb",
+	{ .compatible = "sophgo,cv1800b-usb",
 	  .data = dwc2_set_cv1800_params },
 	{ .compatible = "st,stm32f4x9-fsotg",
 	  .data = dwc2_set_stm32f4x9_fsotg_params },
@@ -332,6 +352,7 @@ const struct of_device_id dwc2_of_match_table[] = {
 MODULE_DEVICE_TABLE(of, dwc2_of_match_table);
 
 const struct acpi_device_id dwc2_acpi_match[] = {
+	/* This ID refers to the same USB IP as of_device_id brcm,bcm2835-usb */
 	{ "BCM2848", (kernel_ulong_t)dwc2_set_bcm_params },
 	{ },
 };
@@ -1008,11 +1029,33 @@ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
 	return 0;
 }
 
+static int dwc2_limit_speed(struct dwc2_hsotg *hsotg)
+{
+	enum usb_device_speed usb_speed;
+
+	usb_speed = usb_get_maximum_speed(hsotg->dev);
+	switch (usb_speed) {
+	case USB_SPEED_LOW:
+		dev_err(hsotg->dev, "Maximum speed cannot be forced to low-speed\n");
+		return -EINVAL;
+	case USB_SPEED_FULL:
+		if (hsotg->params.speed == DWC2_SPEED_PARAM_LOW)
+			break;
+		hsotg->params.speed = DWC2_SPEED_PARAM_FULL;
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 typedef void (*set_params_cb)(struct dwc2_hsotg *data);
 
 int dwc2_init_params(struct dwc2_hsotg *hsotg)
 {
 	set_params_cb set_params;
+	int ret;
 
 	dwc2_set_default_params(hsotg);
 	dwc2_get_device_properties(hsotg);
@@ -1029,6 +1072,10 @@ int dwc2_init_params(struct dwc2_hsotg *hsotg)
 			set_params(hsotg);
 		}
 	}
+
+	ret = dwc2_limit_speed(hsotg);
+	if (ret)
+		return ret;
 
 	dwc2_check_params(hsotg);
 

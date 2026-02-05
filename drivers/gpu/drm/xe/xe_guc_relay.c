@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/fault-inject.h>
 
 #include <drm/drm_managed.h>
 
@@ -19,6 +20,7 @@
 #include "xe_device.h"
 #include "xe_gt.h"
 #include "xe_gt_sriov_printk.h"
+#include "xe_gt_sriov_pf_service.h"
 #include "xe_guc.h"
 #include "xe_guc_ct.h"
 #include "xe_guc_hxg_helpers.h"
@@ -54,9 +56,19 @@ static struct xe_device *relay_to_xe(struct xe_guc_relay *relay)
 	return gt_to_xe(relay_to_gt(relay));
 }
 
+#define XE_RELAY_DIAG_RATELIMIT_INTERVAL	(10 * HZ)
+#define XE_RELAY_DIAG_RATELIMIT_BURST		10
+
+#define relay_ratelimit_printk(relay, _level, fmt...) ({			\
+	typeof(relay) _r = (relay);						\
+	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_SRIOV) ||				\
+	    ___ratelimit(&_r->diag_ratelimit, "xe_guc_relay"))			\
+		xe_gt_sriov_##_level(relay_to_gt(_r), "relay: " fmt);		\
+})
+
 #define relay_assert(relay, condition)	xe_gt_assert(relay_to_gt(relay), condition)
-#define relay_notice(relay, msg...)	xe_gt_sriov_notice(relay_to_gt(relay), "relay: " msg)
-#define relay_debug(relay, msg...)	xe_gt_sriov_dbg_verbose(relay_to_gt(relay), "relay: " msg)
+#define relay_notice(relay, msg...)	relay_ratelimit_printk((relay), notice, msg)
+#define relay_debug(relay, msg...)	relay_ratelimit_printk((relay), dbg_verbose, msg)
 
 static int relay_get_totalvfs(struct xe_guc_relay *relay)
 {
@@ -223,7 +235,7 @@ __relay_get_transaction(struct xe_guc_relay *relay, bool incoming, u32 remote, u
 	 * with CTB lock held which is marked as used in the reclaim path.
 	 * Btw, that's one of the reason why we use mempool here!
 	 */
-	txn = mempool_alloc(&relay->pool, incoming ? GFP_ATOMIC : GFP_KERNEL);
+	txn = mempool_alloc(&relay->pool, incoming ? GFP_ATOMIC : GFP_NOWAIT);
 	if (!txn)
 		return ERR_PTR(-ENOMEM);
 
@@ -343,6 +355,9 @@ int xe_guc_relay_init(struct xe_guc_relay *relay)
 	INIT_WORK(&relay->worker, relays_worker_fn);
 	INIT_LIST_HEAD(&relay->pending_relays);
 	INIT_LIST_HEAD(&relay->incoming_actions);
+	ratelimit_state_init(&relay->diag_ratelimit,
+			     XE_RELAY_DIAG_RATELIMIT_INTERVAL,
+			     XE_RELAY_DIAG_RATELIMIT_BURST);
 
 	err = mempool_init_kmalloc_pool(&relay->pool, XE_RELAY_MEMPOOL_MIN_NUM +
 					relay_get_totalvfs(relay),
@@ -354,6 +369,7 @@ int xe_guc_relay_init(struct xe_guc_relay *relay)
 
 	return drmm_add_action_or_reset(&xe->drm, __fini_relay, relay);
 }
+ALLOW_ERROR_INJECTION(xe_guc_relay_init, ERRNO); /* See xe_pci_probe() */
 
 static u32 to_relay_error(int err)
 {
@@ -664,6 +680,7 @@ static int relay_testloop_action_handler(struct xe_guc_relay *relay, u32 origin,
 static int relay_action_handler(struct xe_guc_relay *relay, u32 origin,
 				const u32 *msg, u32 len, u32 *response, u32 size)
 {
+	struct xe_gt *gt = relay_to_gt(relay);
 	u32 type;
 	int ret;
 
@@ -674,8 +691,10 @@ static int relay_action_handler(struct xe_guc_relay *relay, u32 origin,
 
 	type = FIELD_GET(GUC_HXG_MSG_0_TYPE, msg[0]);
 
-	/* XXX: PF services will be added later */
-	ret = -EOPNOTSUPP;
+	if (IS_SRIOV_PF(relay_to_xe(relay)))
+		ret = xe_gt_sriov_pf_service_process_request(gt, origin, msg, len, response, size);
+	else
+		ret = -EOPNOTSUPP;
 
 	if (type == GUC_HXG_TYPE_EVENT)
 		relay_assert(relay, ret <= 0);
@@ -757,7 +776,14 @@ static void relay_process_incoming_action(struct xe_guc_relay *relay)
 
 static bool relay_needs_worker(struct xe_guc_relay *relay)
 {
-	return !list_empty(&relay->incoming_actions);
+	bool is_empty;
+
+	spin_lock(&relay->lock);
+	is_empty = list_empty(&relay->incoming_actions);
+	spin_unlock(&relay->lock);
+
+	return !is_empty;
+
 }
 
 static void relay_kick_worker(struct xe_guc_relay *relay)

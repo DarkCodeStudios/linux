@@ -34,7 +34,7 @@ trigger_relevant(struct led_classdev *led_cdev, struct led_trigger *trig)
 }
 
 ssize_t led_trigger_write(struct file *filp, struct kobject *kobj,
-			  struct bin_attribute *bin_attr, char *buf,
+			  const struct bin_attribute *bin_attr, char *buf,
 			  loff_t pos, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -51,6 +51,11 @@ ssize_t led_trigger_write(struct file *filp, struct kobject *kobj,
 
 	if (sysfs_streq(buf, "none")) {
 		led_trigger_remove(led_cdev);
+		goto unlock;
+	}
+
+	if (sysfs_streq(buf, "default")) {
+		led_trigger_set_default(led_cdev);
 		goto unlock;
 	}
 
@@ -98,6 +103,9 @@ static int led_trigger_format(char *buf, size_t size,
 	int len = led_trigger_snprintf(buf, size, "%s",
 				       led_cdev->trigger ? "none" : "[none]");
 
+	if (led_cdev->default_trigger)
+		len += led_trigger_snprintf(buf + len, size - len, " default");
+
 	list_for_each_entry(trig, &trigger_list, next_trig) {
 		bool hit;
 
@@ -123,7 +131,7 @@ static int led_trigger_format(char *buf, size_t size,
  * copy it.
  */
 ssize_t led_trigger_read(struct file *filp, struct kobject *kobj,
-			struct bin_attribute *attr, char *buf,
+			const struct bin_attribute *attr, char *buf,
 			loff_t pos, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -179,9 +187,9 @@ int led_trigger_set(struct led_classdev *led_cdev, struct led_trigger *trig)
 
 		cancel_work_sync(&led_cdev->set_brightness_work);
 		led_stop_software_blink(led_cdev);
+		device_remove_groups(led_cdev->dev, led_cdev->trigger->groups);
 		if (led_cdev->trigger->deactivate)
 			led_cdev->trigger->deactivate(led_cdev);
-		device_remove_groups(led_cdev->dev, led_cdev->trigger->groups);
 		led_cdev->trigger = NULL;
 		led_cdev->trigger_data = NULL;
 		led_cdev->activated = false;
@@ -193,6 +201,19 @@ int led_trigger_set(struct led_classdev *led_cdev, struct led_trigger *trig)
 		list_add_tail_rcu(&led_cdev->trig_list, &trig->led_cdevs);
 		spin_unlock(&trig->leddev_list_lock);
 		led_cdev->trigger = trig;
+
+		/*
+		 * Some activate() calls use led_trigger_event() to initialize
+		 * the brightness of the LED for which the trigger is being set.
+		 * Ensure the led_cdev is visible on trig->led_cdevs for this.
+		 */
+		synchronize_rcu();
+
+		/*
+		 * If "set brightness to 0" is pending in workqueue,
+		 * we don't want that to be reordered after ->activate()
+		 */
+		flush_work(&led_cdev->set_brightness_work);
 
 		ret = 0;
 		if (trig->activate)
@@ -267,6 +288,11 @@ void led_trigger_set_default(struct led_classdev *led_cdev)
 
 	if (!led_cdev->default_trigger)
 		return;
+
+	if (!strcmp(led_cdev->default_trigger, "none")) {
+		led_trigger_remove(led_cdev);
+		return;
+	}
 
 	down_read(&triggers_list_lock);
 	down_write(&led_cdev->trigger_lock);
@@ -395,6 +421,26 @@ void led_trigger_event(struct led_trigger *trig,
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(led_trigger_event);
+
+void led_mc_trigger_event(struct led_trigger *trig,
+			  unsigned int *intensity_value, unsigned int num_colors,
+			  enum led_brightness brightness)
+{
+	struct led_classdev *led_cdev;
+
+	if (!trig)
+		return;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(led_cdev, &trig->led_cdevs, trig_list) {
+		if (!(led_cdev->flags & LED_MULTI_COLOR))
+			continue;
+
+		led_mc_set_brightness(led_cdev, intensity_value, num_colors, brightness);
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(led_mc_trigger_event);
 
 static void led_trigger_blink_setup(struct led_trigger *trig,
 			     unsigned long delay_on,

@@ -1618,6 +1618,9 @@ static struct clk_regmap *disp_cc_x1e80100_clocks[] = {
 
 static const struct qcom_reset_map disp_cc_x1e80100_resets[] = {
 	[DISP_CC_MDSS_CORE_BCR] = { 0x8000 },
+	[DISP_CC_MDSS_DPTX0_USB_ROUTER_LINK_INTF_CLK_ARES] = { .reg = 0x8044, .bit = 2 },
+	[DISP_CC_MDSS_DPTX1_USB_ROUTER_LINK_INTF_CLK_ARES] = { .reg = 0x8068, .bit = 2 },
+	[DISP_CC_MDSS_DPTX2_USB_ROUTER_LINK_INTF_CLK_ARES] = { .reg = 0x8088, .bit = 2 },
 	[DISP_CC_MDSS_CORE_INT2_BCR] = { 0xa000 },
 	[DISP_CC_MDSS_RSCC_BCR] = { 0xc000 },
 };
@@ -1680,7 +1683,7 @@ static int disp_cc_x1e80100_probe(struct platform_device *pdev)
 	qcom_branch_set_clk_en(regmap, 0xe074); /* DISP_CC_SLEEP_CLK */
 	qcom_branch_set_clk_en(regmap, 0xe054); /* DISP_CC_XO_CLK */
 
-	ret = qcom_cc_really_probe(pdev, &disp_cc_x1e80100_desc, regmap);
+	ret = qcom_cc_really_probe(&pdev->dev, &disp_cc_x1e80100_desc, regmap);
 	if (ret)
 		goto err_put_rpm;
 

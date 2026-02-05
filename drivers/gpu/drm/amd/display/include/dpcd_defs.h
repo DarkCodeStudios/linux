@@ -30,6 +30,22 @@
 #ifndef DP_SINK_HW_REVISION_START // can remove this once the define gets into linux drm_dp_helper.h
 #define DP_SINK_HW_REVISION_START 0x409
 #endif
+/* Panel Replay*/
+#ifndef DP_PANEL_REPLAY_CAPABILITY_SUPPORT // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PANEL_REPLAY_CAPABILITY_SUPPORT 0x0b0
+#endif /* DP_PANEL_REPLAY_CAPABILITY_SUPPORT */
+#ifndef DP_PANEL_REPLAY_CAPABILITY // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PANEL_REPLAY_CAPABILITY 0x0b1
+#endif /* DP_PANEL_REPLAY_CAPABILITY */
+#ifndef DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_1  // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_1  0x1b0
+#endif /* DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_1 */
+#ifndef DP_PANEL_REPLAY_ENABLE // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PANEL_REPLAY_ENABLE (1 << 0)
+#endif /* DP_PANEL_REPLAY_ENABLE */
+#ifndef DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_2 // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_2 0x1b1
+#endif /* DP_PANEL_REPLAY_ENABLE_AND_CONFIGURATION_2 */
 
 enum dpcd_revision {
 	DPCD_REV_10 = 0x10,
@@ -164,18 +180,19 @@ enum dpcd_psr_sink_states {
 	PSR_SINK_STATE_SINK_INTERNAL_ERROR = 7,
 };
 
-#define DP_SOURCE_SEQUENCE    		    0x30c
-#define DP_SOURCE_TABLE_REVISION	    0x310
-#define DP_SOURCE_PAYLOAD_SIZE		    0x311
-#define DP_SOURCE_SINK_CAP		    0x317
-#define DP_SOURCE_BACKLIGHT_LEVEL	    0x320
-#define DP_SOURCE_BACKLIGHT_CURRENT_PEAK    0x326
-#define DP_SOURCE_BACKLIGHT_CONTROL	    0x32E
-#define DP_SOURCE_BACKLIGHT_ENABLE	    0x32F
-#define DP_SOURCE_MINIMUM_HBLANK_SUPPORTED     0x340
+#define DP_SOURCE_SEQUENCE                      0x30C
+#define DP_SOURCE_TABLE_REVISION                0x310
+#define DP_SOURCE_PAYLOAD_SIZE                  0x311
+#define DP_SOURCE_SINK_CAP                      0x317
+#define DP_SOURCE_BACKLIGHT_LEVEL               0x320
+#define DP_SOURCE_BACKLIGHT_CURRENT_PEAK        0x326
+#define DP_SOURCE_BACKLIGHT_CONTROL             0x32E
+#define DP_SOURCE_BACKLIGHT_ENABLE              0x32F
+#define DP_SOURCE_MINIMUM_HBLANK_SUPPORTED      0x340
 #define DP_SINK_PR_REPLAY_STATUS                0x378
 #define DP_SINK_PR_PIXEL_DEVIATION_PER_LINE     0x379
 #define DP_SINK_PR_MAX_NUMBER_OF_DEVIATION_LINE 0x37A
+#define DP_SINK_EMISSION_RATE                   0x37E
 
 /* Remove once drm_dp_helper.h is updated upstream */
 #ifndef DP_TOTAL_LTTPR_CNT

@@ -144,7 +144,7 @@ enum xlog_iclog_state {
 
 #define XLOG_COVER_OPS		5
 
-typedef struct xlog_ticket {
+struct xlog_ticket {
 	struct list_head	t_queue;	/* reserve/write queue */
 	struct task_struct	*t_task;	/* task that owns this ticket */
 	xlog_tid_t		t_tid;		/* transaction identifier */
@@ -155,13 +155,11 @@ typedef struct xlog_ticket {
 	char			t_cnt;		/* current unit count */
 	uint8_t			t_flags;	/* properties of reservation */
 	int			t_iclog_hdrs;	/* iclog hdrs in t_curr_res */
-} xlog_ticket_t;
+};
 
 /*
- * - A log record header is 512 bytes.  There is plenty of room to grow the
- *	xlog_rec_header_t into the reserved space.
- * - ic_data follows, so a write to disk can start at the beginning of
- *	the iclog.
+ * In-core log structure.
+ *
  * - ic_forcewait is used to implement synchronous forcing of the iclog to disk.
  * - ic_next is the pointer to the next iclog in the ring.
  * - ic_log is a pointer back to the global log structure.
@@ -183,7 +181,7 @@ typedef struct xlog_ticket {
  * We'll put all the read-only and l_icloglock fields in the first cacheline,
  * and move everything else out to subsequent cachelines.
  */
-typedef struct xlog_in_core {
+struct xlog_in_core {
 	wait_queue_head_t	ic_force_wait;
 	wait_queue_head_t	ic_write_wait;
 	struct xlog_in_core	*ic_next;
@@ -198,8 +196,7 @@ typedef struct xlog_in_core {
 
 	/* reference counts need their own cacheline */
 	atomic_t		ic_refcnt ____cacheline_aligned_in_smp;
-	xlog_in_core_2_t	*ic_data;
-#define ic_header	ic_data->hic_header
+	struct xlog_rec_header	*ic_header;
 #ifdef DEBUG
 	bool			ic_fail_crc : 1;
 #endif
@@ -207,7 +204,7 @@ typedef struct xlog_in_core {
 	struct work_struct	ic_end_io_work;
 	struct bio		ic_bio;
 	struct bio_vec		ic_bvec[];
-} xlog_in_core_t;
+};
 
 /*
  * The CIL context is used to aggregate per-transaction details as well be
@@ -409,7 +406,6 @@ struct xlog {
 	struct list_head	*l_buf_cancel_table;
 	struct list_head	r_dfops;	/* recovered log intent items */
 	int			l_iclog_hsize;  /* size of iclog header */
-	int			l_iclog_heads;  /* # of iclog header sectors */
 	uint			l_sectBBsize;   /* sector size in BBs (2^n) */
 	int			l_iclog_size;	/* size of log in bytes */
 	int			l_iclog_bufs;	/* number of iclog buffers */
@@ -422,7 +418,7 @@ struct xlog {
 						/* waiting for iclog flush */
 	int			l_covered_state;/* state of "covering disk
 						 * log entries" */
-	xlog_in_core_t		*l_iclog;       /* head log queue	*/
+	struct xlog_in_core	*l_iclog;       /* head log queue	*/
 	spinlock_t		l_icloglock;    /* grab to change iclog state */
 	int			l_curr_cycle;   /* Cycle number of log writes */
 	int			l_prev_cycle;   /* Cycle number before last
@@ -431,18 +427,16 @@ struct xlog {
 	int			l_prev_block;   /* previous logical log block */
 
 	/*
-	 * l_last_sync_lsn and l_tail_lsn are atomics so they can be set and
-	 * read without needing to hold specific locks. To avoid operations
-	 * contending with other hot objects, place each of them on a separate
-	 * cacheline.
+	 * l_tail_lsn is atomic so it can be set and read without needing to
+	 * hold specific locks. To avoid operations contending with other hot
+	 * objects, it on a separate cacheline.
 	 */
-	/* lsn of last LR on disk */
-	atomic64_t		l_last_sync_lsn ____cacheline_aligned_in_smp;
 	/* lsn of 1st LR with unflushed * buffers */
 	atomic64_t		l_tail_lsn ____cacheline_aligned_in_smp;
 
 	struct xlog_grant_head	l_reserve_head;
 	struct xlog_grant_head	l_write_head;
+	uint64_t		l_tail_space;
 
 	struct xfs_kobj		l_kobj;
 
@@ -460,6 +454,7 @@ struct xlog {
 #define XLOG_IO_ERROR		2	/* log hit an I/O error, and being
 				   shutdown */
 #define XLOG_TAIL_WARN		3	/* log tail verify warning issued */
+#define XLOG_SHUTDOWN_STARTED	4	/* xlog_force_shutdown() exclusion */
 
 static inline bool
 xlog_recovery_needed(struct xlog *log)
@@ -500,8 +495,8 @@ xlog_recover_finish(
 extern void
 xlog_recover_cancel(struct xlog *);
 
-extern __le32	 xlog_cksum(struct xlog *log, struct xlog_rec_header *rhead,
-			    char *dp, int size);
+__le32	 xlog_cksum(struct xlog *log, struct xlog_rec_header *rhead,
+		char *dp, unsigned int hdrsize, unsigned int size);
 
 extern struct kmem_cache *xfs_log_ticket_cache;
 struct xlog_ticket *xlog_ticket_alloc(struct xlog *log, int unit_bytes,
@@ -543,36 +538,6 @@ static inline void
 xlog_assign_atomic_lsn(atomic64_t *lsn, uint cycle, uint block)
 {
 	atomic64_set(lsn, xlog_assign_lsn(cycle, block));
-}
-
-/*
- * When we crack the grant head, we sample it first so that the value will not
- * change while we are cracking it into the component values. This means we
- * will always get consistent component values to work from.
- */
-static inline void
-xlog_crack_grant_head_val(int64_t val, int *cycle, int *space)
-{
-	*cycle = val >> 32;
-	*space = val & 0xffffffff;
-}
-
-static inline void
-xlog_crack_grant_head(atomic64_t *head, int *cycle, int *space)
-{
-	xlog_crack_grant_head_val(atomic64_read(head), cycle, space);
-}
-
-static inline int64_t
-xlog_assign_grant_head_val(int cycle, int space)
-{
-	return ((int64_t)cycle << 32) | space;
-}
-
-static inline void
-xlog_assign_grant_head(atomic64_t *head, int cycle, int space)
-{
-	atomic64_set(head, xlog_assign_grant_head_val(cycle, space));
 }
 
 /*
@@ -622,6 +587,27 @@ xlog_wait(
 
 int xlog_wait_on_iclog(struct xlog_in_core *iclog)
 		__releases(iclog->ic_log->l_icloglock);
+
+/* Calculate the distance between two LSNs in bytes */
+static inline uint64_t
+xlog_lsn_sub(
+	struct xlog	*log,
+	xfs_lsn_t	high,
+	xfs_lsn_t	low)
+{
+	uint32_t	hi_cycle = CYCLE_LSN(high);
+	uint32_t	hi_block = BLOCK_LSN(high);
+	uint32_t	lo_cycle = CYCLE_LSN(low);
+	uint32_t	lo_block = BLOCK_LSN(low);
+
+	if (hi_cycle == lo_cycle)
+		return BBTOB(hi_block - lo_block);
+	ASSERT((hi_cycle == lo_cycle + 1) || xlog_is_shutdown(log));
+	return (uint64_t)log->l_logsize - BBTOB(lo_block - hi_block);
+}
+
+void xlog_grant_return_space(struct xlog *log, xfs_lsn_t old_head,
+		xfs_lsn_t new_head);
 
 /*
  * The LSN is valid so long as it is behind the current LSN. If it isn't, this
@@ -706,6 +692,36 @@ xlog_kvmalloc(
 	} while (!p);
 
 	return p;
+}
+
+/*
+ * Given a count of iovecs and space for a log item, compute the space we need
+ * in the log to store that data plus the log headers.
+ */
+static inline unsigned int
+xlog_item_space(
+	unsigned int	niovecs,
+	unsigned int	nbytes)
+{
+	nbytes += niovecs * (sizeof(uint64_t) + sizeof(struct xlog_op_header));
+	return round_up(nbytes, sizeof(uint64_t));
+}
+
+/*
+ * Cycles over XLOG_CYCLE_DATA_SIZE overflow into the extended header that was
+ * added for v2 logs.  Addressing for the cycles array there is off by one,
+ * because the first batch of cycles is in the original header.
+ */
+static inline __be32 *xlog_cycle_data(struct xlog_rec_header *rhead, unsigned i)
+{
+	if (i >= XLOG_CYCLE_DATA_SIZE) {
+		unsigned	j = i / XLOG_CYCLE_DATA_SIZE;
+		unsigned	k = i % XLOG_CYCLE_DATA_SIZE;
+
+		return &rhead->h_ext[j - 1].xh_cycle_data[k];
+	}
+
+	return &rhead->h_cycle_data[i];
 }
 
 #endif	/* __XFS_LOG_PRIV_H__ */

@@ -19,6 +19,25 @@ extern int hid_bpf_hw_request(struct hid_bpf_ctx *ctx,
 			      size_t buf__sz,
 			      enum hid_report_type type,
 			      enum hid_class_request reqtype) __ksym;
+extern int hid_bpf_hw_output_report(struct hid_bpf_ctx *ctx,
+				    __u8 *buf, size_t buf__sz) __weak __ksym;
+extern int hid_bpf_input_report(struct hid_bpf_ctx *ctx,
+				enum hid_report_type type,
+				__u8 *data,
+				size_t buf__sz) __weak __ksym;
+extern int hid_bpf_try_input_report(struct hid_bpf_ctx *ctx,
+				    enum hid_report_type type,
+				    __u8 *data,
+				    size_t buf__sz) __weak __ksym;
+
+/* bpf_wq implementation */
+extern int bpf_wq_init(struct bpf_wq *wq, void *p__map, unsigned int flags) __weak __ksym;
+extern int bpf_wq_start(struct bpf_wq *wq, unsigned int flags) __weak __ksym;
+extern int bpf_wq_set_callback_impl(struct bpf_wq *wq,
+		int (callback_fn)(void *map, int *key, void *value),
+		unsigned int flags__k, void *aux__ign) __ksym;
+#define bpf_wq_set_callback(wq, cb, flags) \
+	bpf_wq_set_callback_impl(wq, cb, flags, NULL)
 
 #define HID_MAX_DESCRIPTOR_SIZE	4096
 #define HID_IGNORE_EVENT	-1
@@ -66,6 +85,7 @@ extern int hid_bpf_hw_request(struct hid_bpf_ctx *ctx,
 #define HID_VID_ANY				0x0000
 #define HID_PID_ANY				0x0000
 
+#define BIT(n) (1UL << (n))
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
 /* Helper macro to convert (foo, __LINE__)  into foo134 so we can use __LINE__ for

@@ -66,6 +66,9 @@ static int gpio_sbu_mux_set(struct typec_mux_dev *mux,
 {
 	struct gpio_sbu_mux *sbu_mux = typec_mux_get_drvdata(mux);
 
+	if (!sbu_mux->enable_gpio)
+		return -EOPNOTSUPP;
+
 	mutex_lock(&sbu_mux->lock);
 
 	switch (state->mode) {
@@ -102,7 +105,8 @@ static int gpio_sbu_mux_probe(struct platform_device *pdev)
 
 	mutex_init(&sbu_mux->lock);
 
-	sbu_mux->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
+	sbu_mux->enable_gpio = devm_gpiod_get_optional(dev, "enable",
+						       GPIOD_OUT_LOW);
 	if (IS_ERR(sbu_mux->enable_gpio))
 		return dev_err_probe(dev, PTR_ERR(sbu_mux->enable_gpio),
 				     "unable to acquire enable gpio\n");
@@ -155,7 +159,7 @@ MODULE_DEVICE_TABLE(of, gpio_sbu_mux_match);
 
 static struct platform_driver gpio_sbu_mux_driver = {
 	.probe = gpio_sbu_mux_probe,
-	.remove_new = gpio_sbu_mux_remove,
+	.remove = gpio_sbu_mux_remove,
 	.driver = {
 		.name = "gpio_sbu_mux",
 		.of_match_table = gpio_sbu_mux_match,

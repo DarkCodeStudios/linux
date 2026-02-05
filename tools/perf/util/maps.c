@@ -428,11 +428,29 @@ static unsigned int maps__by_name_index(const struct maps *maps, const struct ma
 	return -1;
 }
 
+static void map__set_kmap_maps(struct map *map, struct maps *maps)
+{
+	struct dso *dso;
+
+	if (map == NULL)
+		return;
+
+	dso = map__dso(map);
+
+	if (dso && dso__kernel(dso)) {
+                struct kmap *kmap = map__kmap(map);
+
+                if (kmap)
+                        kmap->kmaps = maps;
+                else
+                        pr_err("Internal error: kernel dso with non kernel map\n");
+        }
+}
+
 static int __maps__insert(struct maps *maps, struct map *new)
 {
 	struct map **maps_by_address = maps__maps_by_address(maps);
 	struct map **maps_by_name = maps__maps_by_name(maps);
-	const struct dso *dso = map__dso(new);
 	unsigned int nr_maps = maps__nr_maps(maps);
 	unsigned int nr_allocate = RC_CHK_ACCESS(maps)->nr_maps_allocated;
 
@@ -459,6 +477,7 @@ static int __maps__insert(struct maps *maps, struct map *new)
 	}
 	/* Insert the value at the end. */
 	maps_by_address[nr_maps] = map__get(new);
+	map__set_kmap_maps(new, maps);
 	if (maps_by_name)
 		maps_by_name[nr_maps] = map__get(new);
 
@@ -483,14 +502,7 @@ static int __maps__insert(struct maps *maps, struct map *new)
 	}
 	if (map__end(new) < map__start(new))
 		RC_CHK_ACCESS(maps)->ends_broken = true;
-	if (dso && dso__kernel(dso)) {
-		struct kmap *kmap = map__kmap(new);
 
-		if (kmap)
-			kmap->kmaps = maps;
-		else
-			pr_err("Internal error: kernel dso with non kernel map\n");
-	}
 	return 0;
 }
 
@@ -735,26 +747,83 @@ static unsigned int first_ending_after(struct maps *maps, const struct map *map)
 	return first;
 }
 
+static int __maps__insert_sorted(struct maps *maps, unsigned int first_after_index,
+				 struct map *new1, struct map *new2)
+{
+	struct map **maps_by_address = maps__maps_by_address(maps);
+	struct map **maps_by_name = maps__maps_by_name(maps);
+	unsigned int nr_maps = maps__nr_maps(maps);
+	unsigned int nr_allocate = RC_CHK_ACCESS(maps)->nr_maps_allocated;
+	unsigned int to_add = new2 ? 2 : 1;
+
+	assert(maps__maps_by_address_sorted(maps));
+	assert(first_after_index == nr_maps ||
+	       map__end(new1) <= map__start(maps_by_address[first_after_index]));
+	assert(!new2 || map__end(new1) <= map__start(new2));
+	assert(first_after_index == nr_maps || !new2 ||
+	       map__end(new2) <= map__start(maps_by_address[first_after_index]));
+
+	if (nr_maps + to_add > nr_allocate) {
+		nr_allocate = !nr_allocate ? 32 : nr_allocate * 2;
+
+		maps_by_address = realloc(maps_by_address, nr_allocate * sizeof(new1));
+		if (!maps_by_address)
+			return -ENOMEM;
+
+		maps__set_maps_by_address(maps, maps_by_address);
+		if (maps_by_name) {
+			maps_by_name = realloc(maps_by_name, nr_allocate * sizeof(new1));
+			if (!maps_by_name) {
+				/*
+				 * If by name fails, just disable by name and it will
+				 * recompute next time it is required.
+				 */
+				__maps__free_maps_by_name(maps);
+			}
+			maps__set_maps_by_name(maps, maps_by_name);
+		}
+		RC_CHK_ACCESS(maps)->nr_maps_allocated = nr_allocate;
+	}
+	memmove(&maps_by_address[first_after_index+to_add],
+		&maps_by_address[first_after_index],
+		(nr_maps - first_after_index) * sizeof(new1));
+	maps_by_address[first_after_index] = map__get(new1);
+	if (maps_by_name)
+		maps_by_name[nr_maps] = map__get(new1);
+	if (new2) {
+		maps_by_address[first_after_index + 1] = map__get(new2);
+		if (maps_by_name)
+			maps_by_name[nr_maps + 1] = map__get(new2);
+	}
+	RC_CHK_ACCESS(maps)->nr_maps = nr_maps + to_add;
+	maps__set_maps_by_name_sorted(maps, false);
+	map__set_kmap_maps(new1, maps);
+	map__set_kmap_maps(new2, maps);
+
+	check_invariants(maps);
+	return 0;
+}
+
 /*
  * Adds new to maps, if new overlaps existing entries then the existing maps are
  * adjusted or removed so that new fits without overlapping any entries.
  */
 static int __maps__fixup_overlap_and_insert(struct maps *maps, struct map *new)
 {
-	struct map **maps_by_address;
 	int err = 0;
 	FILE *fp = debug_file();
+	unsigned int i, ni = INT_MAX; // Some gcc complain, but depends on maps_by_name...
 
-sort_again:
 	if (!maps__maps_by_address_sorted(maps))
 		__maps__sort_by_address(maps);
 
-	maps_by_address = maps__maps_by_address(maps);
 	/*
 	 * Iterate through entries where the end of the existing entry is
 	 * greater-than the new map's start.
 	 */
-	for (unsigned int i = first_ending_after(maps, new); i < maps__nr_maps(maps); ) {
+	for (i = first_ending_after(maps, new); i < maps__nr_maps(maps); ) {
+		struct map **maps_by_address = maps__maps_by_address(maps);
+		struct map **maps_by_name = maps__maps_by_name(maps);
 		struct map *pos = maps_by_address[i];
 		struct map *before = NULL, *after = NULL;
 
@@ -773,6 +842,9 @@ sort_again:
 			map__fprintf(new, fp);
 			map__fprintf(pos, fp);
 		}
+
+		if (maps_by_name)
+			ni = maps__by_name_index(maps, pos);
 
 		/*
 		 * Now check if we need to create new maps for areas not
@@ -818,40 +890,97 @@ sort_again:
 		if (before) {
 			map__put(maps_by_address[i]);
 			maps_by_address[i] = before;
+			map__set_kmap_maps(before, maps);
+
+			if (maps_by_name) {
+				map__put(maps_by_name[ni]);
+				maps_by_name[ni] = map__get(before);
+			}
+
 			/* Maps are still ordered, go to next one. */
 			i++;
 			if (after) {
-				__maps__insert(maps, after);
-				map__put(after);
-				if (!maps__maps_by_address_sorted(maps)) {
-					/*
-					 * Sorting broken so invariants don't
-					 * hold, sort and go again.
-					 */
-					goto sort_again;
-				}
 				/*
-				 * Maps are still ordered, skip after and go to
-				 * next one (terminate loop).
+				 * 'before' and 'after' mean 'new' split the
+				 * 'pos' mapping and therefore there are no
+				 * later mappings.
 				 */
-				i++;
+				err = __maps__insert_sorted(maps, i, new, after);
+				map__put(after);
+				check_invariants(maps);
+				return err;
 			}
+			check_invariants(maps);
 		} else if (after) {
+			/*
+			 * 'after' means 'new' split 'pos' and there are no
+			 * later mappings.
+			 */
 			map__put(maps_by_address[i]);
-			maps_by_address[i] = after;
-			/* Maps are ordered, go to next one. */
-			i++;
+			maps_by_address[i] = map__get(new);
+			map__set_kmap_maps(new, maps);
+
+			if (maps_by_name) {
+				map__put(maps_by_name[ni]);
+				maps_by_name[ni] = map__get(new);
+			}
+
+			err = __maps__insert_sorted(maps, i + 1, after, NULL);
+			map__put(after);
+			check_invariants(maps);
+			return err;
 		} else {
-			__maps__remove(maps, pos);
+			struct map *next = NULL;
+			unsigned int nr_maps = maps__nr_maps(maps);
+
+			if (i + 1 < nr_maps)
+				next = maps_by_address[i + 1];
+
+			if (!next  || map__start(next) >= map__end(new)) {
+				/*
+				 * Replace existing mapping and end knowing
+				 * there aren't later overlapping or any
+				 * mappings.
+				 */
+				map__put(maps_by_address[i]);
+				maps_by_address[i] = map__get(new);
+				map__set_kmap_maps(new, maps);
+
+				if (maps_by_name) {
+					map__put(maps_by_name[ni]);
+					maps_by_name[ni] = map__get(new);
+				}
+
+				check_invariants(maps);
+				return err;
+			}
+			/*
+			 * pos fully covers the previous mapping so remove
+			 * it. The following is an inlined version of
+			 * maps__remove that reuses the already computed
+			 * indices.
+			 */
+			map__put(maps_by_address[i]);
+			memmove(&maps_by_address[i],
+				&maps_by_address[i + 1],
+				(nr_maps - i - 1) * sizeof(*maps_by_address));
+
+			if (maps_by_name) {
+				map__put(maps_by_name[ni]);
+				memmove(&maps_by_name[ni],
+					&maps_by_name[ni + 1],
+					(nr_maps - ni - 1) *  sizeof(*maps_by_name));
+			}
+			--RC_CHK_ACCESS(maps)->nr_maps;
+			check_invariants(maps);
 			/*
 			 * Maps are ordered but no need to increase `i` as the
 			 * later maps were moved down.
 			 */
 		}
-		check_invariants(maps);
 	}
 	/* Add the map. */
-	__maps__insert(maps, new);
+	err = __maps__insert_sorted(maps, i, new, NULL);
 out_err:
 	return err;
 }
@@ -908,6 +1037,7 @@ int maps__copy_from(struct maps *dest, struct maps *parent)
 				err = unwind__prepare_access(dest, new, NULL);
 				if (!err) {
 					dest_maps_by_address[i] = new;
+					map__set_kmap_maps(new, dest);
 					if (dest_maps_by_name)
 						dest_maps_by_name[i] = map__get(new);
 					RC_CHK_ACCESS(dest)->nr_maps = i + 1;
@@ -971,10 +1101,13 @@ struct map *maps__find(struct maps *maps, u64 ip)
 	while (!done) {
 		down_read(maps__lock(maps));
 		if (maps__maps_by_address_sorted(maps)) {
-			struct map **mapp =
-				bsearch(&ip, maps__maps_by_address(maps), maps__nr_maps(maps),
-					sizeof(*mapp), map__addr_cmp);
+			struct map **mapp = NULL;
+			struct map **maps_by_address = maps__maps_by_address(maps);
+			unsigned int nr_maps = maps__nr_maps(maps);
 
+			if (maps_by_address && nr_maps)
+				mapp = bsearch(&ip, maps_by_address, nr_maps, sizeof(*mapp),
+					       map__addr_cmp);
 			if (mapp)
 				result = map__get(*mapp);
 			done = true;
@@ -1065,8 +1198,13 @@ struct map *maps__find_next_entry(struct maps *maps, struct map *map)
 	struct map *result = NULL;
 
 	down_read(maps__lock(maps));
+	while (!maps__maps_by_address_sorted(maps)) {
+		up_read(maps__lock(maps));
+		maps__sort_by_address(maps);
+		down_read(maps__lock(maps));
+	}
 	i = maps__by_address_index(maps, map);
-	if (i < maps__nr_maps(maps))
+	if (++i < maps__nr_maps(maps))
 		result = map__get(maps__maps_by_address(maps)[i]);
 
 	up_read(maps__lock(maps));

@@ -387,11 +387,8 @@ static int efx_tc_flower_parse_match(struct efx_nic *efx,
 		struct flow_match_control fm;
 
 		flow_rule_match_enc_control(rule, &fm);
-		if (fm.mask->flags) {
-			NL_SET_ERR_MSG_FMT_MOD(extack, "Unsupported match on enc_control.flags %#x",
-					       fm.mask->flags);
+		if (flow_rule_has_enc_control_flags(fm.mask->flags, extack))
 			return -EOPNOTSUPP;
-		}
 		if (!IS_ALL_ONES(fm.mask->addr_type)) {
 			NL_SET_ERR_MSG_FMT_MOD(extack, "Unsupported enc addr_type mask %u (key %u)",
 					       fm.mask->addr_type,
@@ -1046,7 +1043,7 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
 				return -EOPNOTSUPP;
 			}
 			if (fa->ct.action) {
-				NL_SET_ERR_MSG_FMT_MOD(extack, "Unhandled ct.action %u for LHS rule\n",
+				NL_SET_ERR_MSG_FMT_MOD(extack, "Unhandled ct.action %u for LHS rule",
 						       fa->ct.action);
 				return -EOPNOTSUPP;
 			}
@@ -1059,7 +1056,7 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
 			act->zone = ct_zone;
 			break;
 		default:
-			NL_SET_ERR_MSG_FMT_MOD(extack, "Unhandled action %u for LHS rule\n",
+			NL_SET_ERR_MSG_FMT_MOD(extack, "Unhandled action %u for LHS rule",
 					       fa->id);
 			return -EOPNOTSUPP;
 		}
@@ -1584,7 +1581,7 @@ static int efx_tc_flower_replace_foreign_lhs(struct efx_nic *efx,
 
 	type = efx_tc_indr_netdev_type(net_dev);
 	if (type == EFX_ENCAP_TYPE_NONE) {
-		NL_SET_ERR_MSG_MOD(extack, "Egress encap match on unsupported tunnel device\n");
+		NL_SET_ERR_MSG_MOD(extack, "Egress encap match on unsupported tunnel device");
 		return -EOPNOTSUPP;
 	}
 

@@ -22,8 +22,10 @@
 *.dtb.S
 *.dtbo.S
 *.dwo
+*.dylib
 *.elf
 *.gcno
+*.gcda
 *.gz
 *.i
 *.ko
@@ -38,6 +40,8 @@
 *.o
 *.o.*
 *.patch
+*.pyc
+*.rlib
 *.rmeta
 *.rpm
 *.rsi
@@ -46,7 +50,6 @@
 *.so.dbg
 *.su
 *.symtypes
-*.symversions
 *.tab.[ch]
 *.tar
 *.xz
@@ -64,12 +67,14 @@ modules.order
 /vmlinux.32
 /vmlinux.map
 /vmlinux.symvers
+/vmlinux.unstripped
 /vmlinux-gdb.py
 /vmlinuz
 /System.map
 /Module.markers
 /modules.builtin
 /modules.builtin.modinfo
+/modules.builtin.ranges
 /modules.nsdeps
 
 #
@@ -93,9 +98,16 @@ modules.order
 /tar-install/
 
 #
+# pacman files (make pacman-pkg)
+#
+/PKGBUILD
+/pacman/
+
+#
 # We don't want to ignore the following even if they are dot-files
 #
 !.clang-format
+!.clippy.toml
 !.cocciconfig
 !.editorconfig
 !.get_maintainer.ignore
@@ -103,6 +115,7 @@ modules.order
 !.gitignore
 !.kunitconfig
 !.mailmap
+!.pylintrc
 !.rustfmt.toml
 
 #
@@ -121,6 +134,7 @@ series
 
 # ctags files
 tags
+!tags/
 TAGS
 
 # cscope files
@@ -136,7 +150,6 @@ GTAGS
 # id-utils files
 ID
 
-*.orig
 *~
 \#*#
 
@@ -164,7 +177,7 @@ x509.genkey
 *.kdev4
 
 # Clang's compilation database file
-/compile_commands.json
+compile_commands.json
 
 # Documentation toolchain
 sphinx_*/

@@ -23,10 +23,10 @@ struct xe_sched_job *xe_sched_job_create(struct xe_exec_queue *q,
 void xe_sched_job_destroy(struct kref *ref);
 
 /**
- * xe_sched_job_get - get reference to XE schedule job
- * @job: XE schedule job object
+ * xe_sched_job_get - get reference to Xe schedule job
+ * @job: Xe schedule job object
  *
- * Increment XE schedule job's reference count
+ * Increment Xe schedule job's reference count
  */
 static inline struct xe_sched_job *xe_sched_job_get(struct xe_sched_job *job)
 {
@@ -35,10 +35,10 @@ static inline struct xe_sched_job *xe_sched_job_get(struct xe_sched_job *job)
 }
 
 /**
- * xe_sched_job_put - put reference to XE schedule job
- * @job: XE schedule job object
+ * xe_sched_job_put - put reference to Xe schedule job
+ * @job: Xe schedule job object
  *
- * Decrement XE schedule job's reference count, call xe_sched_job_destroy when
+ * Decrement Xe schedule job's reference count, call xe_sched_job_destroy when
  * reference count == 0.
  */
 static inline void xe_sched_job_put(struct xe_sched_job *job)
@@ -58,7 +58,6 @@ bool xe_sched_job_completed(struct xe_sched_job *job);
 void xe_sched_job_arm(struct xe_sched_job *job);
 void xe_sched_job_push(struct xe_sched_job *job);
 
-int xe_sched_job_last_fence_add_dep(struct xe_sched_job *job, struct xe_vm *vm);
 void xe_sched_job_init_user_fence(struct xe_sched_job *job,
 				  struct xe_sync_entry *sync);
 
@@ -70,7 +69,12 @@ to_xe_sched_job(struct drm_sched_job *drm)
 
 static inline u32 xe_sched_job_seqno(struct xe_sched_job *job)
 {
-	return job->fence->seqno;
+	return job->fence ? job->fence->seqno : 0;
+}
+
+static inline u32 xe_sched_job_lrc_seqno(struct xe_sched_job *job)
+{
+	return job->lrc_seqno;
 }
 
 static inline void
@@ -84,5 +88,8 @@ bool xe_sched_job_is_migration(struct xe_exec_queue *q);
 struct xe_sched_job_snapshot *xe_sched_job_snapshot_capture(struct xe_sched_job *job);
 void xe_sched_job_snapshot_free(struct xe_sched_job_snapshot *snapshot);
 void xe_sched_job_snapshot_print(struct xe_sched_job_snapshot *snapshot, struct drm_printer *p);
+
+int xe_sched_job_add_deps(struct xe_sched_job *job, struct dma_resv *resv,
+			  enum dma_resv_usage usage);
 
 #endif

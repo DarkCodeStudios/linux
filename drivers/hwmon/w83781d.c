@@ -1192,8 +1192,6 @@ static void w83781d_remove_files(struct device *dev)
 	sysfs_remove_group(&dev->kobj, &w83781d_group_other);
 }
 
-static const struct i2c_device_id w83781d_ids[];
-
 static int w83781d_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -1208,7 +1206,7 @@ static int w83781d_probe(struct i2c_client *client)
 	mutex_init(&data->lock);
 	mutex_init(&data->update_lock);
 
-	data->type = i2c_match_id(w83781d_ids, client)->driver_data;
+	data->type = (uintptr_t)i2c_get_match_data(client);
 	data->client = client;
 
 	/* attach secondary i2c lm75-like clients */
@@ -1830,7 +1828,7 @@ static struct platform_driver w83781d_isa_driver = {
 		.name = "w83781d",
 	},
 	.probe = w83781d_isa_probe,
-	.remove_new = w83781d_isa_remove,
+	.remove = w83781d_isa_remove,
 };
 
 /* return 1 if a supported chip is found, 0 otherwise */
@@ -1852,10 +1850,12 @@ w83781d_isa_found(unsigned short address)
 		}
 	}
 
-#define REALLY_SLOW_IO
 	/*
 	 * We need the timeouts for at least some W83781D-like
 	 * chips. But only if we read 'undefined' registers.
+	 * There used to be a "#define REALLY_SLOW_IO" to enforce that, but
+	 * this has been without any effect since more than a decade, so it
+	 * has been dropped.
 	 */
 	val = inb_p(address + 1);
 	if (inb_p(address + 2) != val
@@ -1864,7 +1864,6 @@ w83781d_isa_found(unsigned short address)
 		pr_debug("Detection failed at step %d\n", 1);
 		goto release;
 	}
-#undef REALLY_SLOW_IO
 
 	/*
 	 * We should be able to change the 7 LSB of the address port. The

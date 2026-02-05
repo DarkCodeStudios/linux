@@ -52,22 +52,22 @@
  * bit in the node type.  This is possible by using bit 1 to indicate if bit 2
  * is part of the type or the slot.
  *
- * Once the type is decided, the decision of an allocation range type or a range
- * type is done by examining the immutable tree flag for the MAPLE_ALLOC_RANGE
- * flag.
+ * Once the type is decided, the decision of an allocation range type or a
+ * range type is done by examining the immutable tree flag for the
+ * MT_FLAGS_ALLOC_RANGE flag.
  *
  *  Node types:
- *   0x??1 = Root
- *   0x?00 = 16 bit nodes
- *   0x010 = 32 bit nodes
- *   0x110 = 64 bit nodes
+ *   0b??1 = Root
+ *   0b?00 = 16 bit nodes
+ *   0b010 = 32 bit nodes
+ *   0b110 = 64 bit nodes
  *
  *  Slot size and location in the parent pointer:
  *   type  : slot location
- *   0x??1 : Root
- *   0x?00 : 16 bit values, type in 0-1, slot in 2-6
- *   0x010 : 32 bit values, type in 0-2, slot in 3-6
- *   0x110 : 64 bit values, type in 0-2, slot in 3-6
+ *   0b??1 : Root
+ *   0b?00 : 16 bit values, type in 0-1, slot in 2-6
+ *   0b010 : 32 bit values, type in 0-2, slot in 3-6
+ *   0b110 : 64 bit values, type in 0-2, slot in 3-6
  */
 
 /*
@@ -75,8 +75,8 @@
  * searching for gaps or any other code that needs to find the end of the data.
  */
 struct maple_metadata {
-	unsigned char end;
-	unsigned char gap;
+	unsigned char end;	/* end of data */
+	unsigned char gap;	/* offset of largest gap */
 };
 
 /*
@@ -148,6 +148,18 @@ enum maple_type {
 	maple_arange_64,
 };
 
+enum store_type {
+	wr_invalid,
+	wr_new_root,
+	wr_store_root,
+	wr_exact_fit,
+	wr_spanning_store,
+	wr_split_store,
+	wr_rebalance,
+	wr_append,
+	wr_node_store,
+	wr_slot_store,
+};
 
 /**
  * DOC: Maple tree flags
@@ -182,7 +194,6 @@ enum maple_type {
 #define MAPLE_RESERVED_RANGE	4096
 
 #ifdef CONFIG_LOCKDEP
-typedef struct lockdep_map *lockdep_map_p;
 #define mt_lock_is_held(mt)                                             \
 	(!(mt)->ma_external_lock || lock_is_held((mt)->ma_external_lock))
 
@@ -195,7 +206,6 @@ typedef struct lockdep_map *lockdep_map_p;
 
 #define mt_on_stack(mt)			(mt).ma_external_lock = NULL
 #else
-typedef struct { /* nothing */ } lockdep_map_p;
 #define mt_lock_is_held(mt)		1
 #define mt_write_lock_is_held(mt)	1
 #define mt_set_external_lock(mt, lock)	do { } while (0)
@@ -212,14 +222,16 @@ typedef struct { /* nothing */ } lockdep_map_p;
  * (set at tree creation time) and dynamic information set under the spinlock.
  *
  * Another use of flags are to indicate global states of the tree.  This is the
- * case with the MAPLE_USE_RCU flag, which indicates the tree is currently in
+ * case with the MT_FLAGS_USE_RCU flag, which indicates the tree is currently in
  * RCU mode.  This mode was added to allow the tree to reuse nodes instead of
  * re-allocating and RCU freeing nodes when there is a single user.
  */
 struct maple_tree {
 	union {
-		spinlock_t	ma_lock;
-		lockdep_map_p	ma_external_lock;
+		spinlock_t		ma_lock;
+#ifdef CONFIG_LOCKDEP
+		struct lockdep_map	*ma_external_lock;
+#endif
 	};
 	unsigned int	ma_flags;
 	void __rcu      *ma_root;
@@ -430,12 +442,15 @@ struct ma_state {
 	struct maple_enode *node;	/* The node containing this entry */
 	unsigned long min;		/* The minimum index of this node - implied pivot min */
 	unsigned long max;		/* The maximum index of this node - implied pivot max */
-	struct maple_alloc *alloc;	/* Allocated nodes for this operation */
+	struct slab_sheaf *sheaf;	/* Allocated nodes for this operation */
+	struct maple_node *alloc;	/* A single allocated node for fast path writes */
+	unsigned long node_request;	/* The number of nodes to allocate for this operation */
 	enum maple_status status;	/* The status of the state (active, start, none, etc) */
 	unsigned char depth;		/* depth of tree descent during write */
 	unsigned char offset;
 	unsigned char mas_flags;
 	unsigned char end;		/* The end of the node */
+	enum store_type store_type;	/* The type of store needed for this operation */
 };
 
 struct ma_wr_state {
@@ -450,6 +465,8 @@ struct ma_wr_state {
 	void __rcu **slots;		/* mas->node->slots pointer */
 	void *entry;			/* The entry to write */
 	void *content;			/* The existing entry that is being overwritten */
+	unsigned char vacant_height;	/* Height of lowest node with free space */
+	unsigned char sufficient_height;/* Height of lowest node with min sufficiency + 1 nodes */
 };
 
 #define mas_lock(mas)           spin_lock(&((mas)->tree->ma_lock))
@@ -466,6 +483,9 @@ struct ma_wr_state {
 #define MA_ERROR(err) \
 		((struct maple_enode *)(((unsigned long)err << 2) | 2UL))
 
+/*
+ * When changing MA_STATE, remember to also change rust/kernel/maple_tree.rs
+ */
 #define MA_STATE(name, mt, first, end)					\
 	struct ma_state name = {					\
 		.tree = mt,						\
@@ -475,8 +495,11 @@ struct ma_wr_state {
 		.status = ma_start,					\
 		.min = 0,						\
 		.max = ULONG_MAX,					\
+		.sheaf = NULL,						\
 		.alloc = NULL,						\
+		.node_request = 0,					\
 		.mas_flags = 0,						\
+		.store_type = wr_invalid,				\
 	}
 
 #define MA_WR_STATE(name, ma_state, wr_entry)				\
@@ -484,6 +507,8 @@ struct ma_wr_state {
 		.mas = ma_state,					\
 		.content = NULL,					\
 		.entry = wr_entry,					\
+		.vacant_height = 0,					\
+		.sufficient_height = 0					\
 	}
 
 #define MA_TOPIARY(name, tree)						\
@@ -577,6 +602,20 @@ static __always_inline void mas_reset(struct ma_state *mas)
  */
 #define mas_for_each(__mas, __entry, __max) \
 	while (((__entry) = mas_find((__mas), (__max))) != NULL)
+
+/**
+ * mas_for_each_rev() - Iterate over a range of the maple tree in reverse order.
+ * @__mas: Maple Tree operation state (maple_state)
+ * @__entry: Entry retrieved from the tree
+ * @__min: minimum index to retrieve from the tree
+ *
+ * When returned, mas->index and mas->last will hold the entire range for the
+ * entry.
+ *
+ * Note: may return the zero entry.
+ */
+#define mas_for_each_rev(__mas, __entry, __min) \
+	while (((__entry) = mas_find_rev((__mas), (__min))) != NULL)
 
 #ifdef CONFIG_DEBUG_MAPLE_TREE
 enum mt_dump_format {

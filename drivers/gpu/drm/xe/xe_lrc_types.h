@@ -6,6 +6,8 @@
 #ifndef _XE_LRC_TYPES_H_
 #define _XE_LRC_TYPES_H_
 
+#include <linux/kref.h>
+
 #include "xe_hw_fence_types.h"
 
 struct xe_bo;
@@ -20,11 +22,19 @@ struct xe_lrc {
 	 */
 	struct xe_bo *bo;
 
-	/** @tile: tile which this LRC belongs to */
-	struct xe_tile *tile;
+	/** @size: size of the lrc and optional indirect ring state */
+	u32 size;
+
+	/** @gt: gt which this LRC belongs to */
+	struct xe_gt *gt;
 
 	/** @flags: LRC flags */
+#define XE_LRC_FLAG_INDIRECT_CTX		0x1
+#define XE_LRC_FLAG_INDIRECT_RING_STATE		0x2
 	u32 flags;
+
+	/** @refcount: ref count of this lrc */
+	struct kref refcount;
 
 	/** @ring: submission ring state */
 	struct {
@@ -41,6 +51,9 @@ struct xe_lrc {
 
 	/** @fence_ctx: context for hw fence */
 	struct xe_hw_fence_ctx fence_ctx;
+
+	/** @ctx_timestamp: readout value of CTX_TIMESTAMP on last update */
+	u64 ctx_timestamp;
 };
 
 struct xe_lrc_snapshot;

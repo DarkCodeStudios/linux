@@ -829,55 +829,6 @@ bool snd_sof_stream_suspend_ignored(struct snd_sof_dev *sdev)
 	return false;
 }
 
-int sof_pcm_stream_free(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream,
-			struct snd_sof_pcm *spcm, int dir, bool free_widget_list)
-{
-	const struct sof_ipc_pcm_ops *pcm_ops = sof_ipc_get_ops(sdev, pcm);
-	int ret;
-	int err = 0;
-
-	if (spcm->prepared[substream->stream]) {
-		/* stop DMA first if needed */
-		if (pcm_ops && pcm_ops->platform_stop_during_hw_free)
-			snd_sof_pcm_platform_trigger(sdev, substream, SNDRV_PCM_TRIGGER_STOP);
-
-		/* free PCM in the DSP */
-		if (pcm_ops && pcm_ops->hw_free) {
-			ret = pcm_ops->hw_free(sdev->component, substream);
-			if (ret < 0) {
-				dev_err(sdev->dev, "%s: pcm_ops hw_free failed %d\n",
-					__func__, ret);
-				err = ret;
-			}
-		}
-
-		spcm->prepared[substream->stream] = false;
-		spcm->pending_stop[substream->stream] = false;
-	}
-
-	/* reset the DMA */
-	ret = snd_sof_pcm_platform_hw_free(sdev, substream);
-	if (ret < 0) {
-		dev_err(sdev->dev, "%s: platform hw free failed %d\n",
-			__func__, ret);
-		if (!err)
-			err = ret;
-	}
-
-	/* free widget list */
-	if (free_widget_list) {
-		ret = sof_widget_list_free(sdev, spcm, dir);
-		if (ret < 0) {
-			dev_err(sdev->dev, "%s: sof_widget_list_free failed %d\n",
-				__func__, ret);
-			if (!err)
-				err = ret;
-		}
-	}
-
-	return err;
-}
-
 /*
  * Generic object lookup APIs.
  */
@@ -978,7 +929,7 @@ struct snd_sof_dai *snd_sof_find_dai(struct snd_soc_component *scomp,
 	return NULL;
 }
 
-static int sof_dai_get_clk(struct snd_soc_pcm_runtime *rtd, int clk_type)
+static int sof_dai_get_param(struct snd_soc_pcm_runtime *rtd, int param_type)
 {
 	struct snd_soc_component *component =
 		snd_soc_rtdcom_lookup(rtd, SOF_AUDIO_PCM_DRV_NAME);
@@ -991,8 +942,8 @@ static int sof_dai_get_clk(struct snd_soc_pcm_runtime *rtd, int clk_type)
 	if (!dai)
 		return 0;
 
-	if (tplg_ops && tplg_ops->dai_get_clk)
-		return tplg_ops->dai_get_clk(sdev, dai, clk_type);
+	if (tplg_ops && tplg_ops->dai_get_param)
+		return tplg_ops->dai_get_param(sdev, dai, param_type);
 
 	return 0;
 }
@@ -1003,7 +954,7 @@ static int sof_dai_get_clk(struct snd_soc_pcm_runtime *rtd, int clk_type)
  */
 int sof_dai_get_mclk(struct snd_soc_pcm_runtime *rtd)
 {
-	return sof_dai_get_clk(rtd, SOF_DAI_CLK_INTEL_SSP_MCLK);
+	return sof_dai_get_param(rtd, SOF_DAI_PARAM_INTEL_SSP_MCLK);
 }
 EXPORT_SYMBOL(sof_dai_get_mclk);
 
@@ -1013,6 +964,16 @@ EXPORT_SYMBOL(sof_dai_get_mclk);
  */
 int sof_dai_get_bclk(struct snd_soc_pcm_runtime *rtd)
 {
-	return sof_dai_get_clk(rtd, SOF_DAI_CLK_INTEL_SSP_BCLK);
+	return sof_dai_get_param(rtd, SOF_DAI_PARAM_INTEL_SSP_BCLK);
 }
 EXPORT_SYMBOL(sof_dai_get_bclk);
+
+/*
+ * Helper to get SSP TDM slot number from a pcm_runtime.
+ * Return 0 if not exist.
+ */
+int sof_dai_get_tdm_slots(struct snd_soc_pcm_runtime *rtd)
+{
+	return sof_dai_get_param(rtd, SOF_DAI_PARAM_INTEL_SSP_TDM_SLOTS);
+}
+EXPORT_SYMBOL(sof_dai_get_tdm_slots);

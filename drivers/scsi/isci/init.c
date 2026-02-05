@@ -65,11 +65,7 @@
 #include "task.h"
 #include "probe_roms.h"
 
-#define MAJ 1
-#define MIN 2
-#define BUILD 0
-#define DRV_VERSION __stringify(MAJ) "." __stringify(MIN) "." \
-	__stringify(BUILD)
+#define DRV_VERSION "1.2.0"
 
 MODULE_VERSION(DRV_VERSION);
 
@@ -95,31 +91,31 @@ MODULE_DEVICE_TABLE(pci, isci_id_table);
 
 /* linux isci specific settings */
 
-unsigned char no_outbound_task_to = 2;
+static unsigned char no_outbound_task_to = 2;
 module_param(no_outbound_task_to, byte, 0);
 MODULE_PARM_DESC(no_outbound_task_to, "No Outbound Task Timeout (1us incr)");
 
-u16 ssp_max_occ_to = 20;
+static u16 ssp_max_occ_to = 20;
 module_param(ssp_max_occ_to, ushort, 0);
 MODULE_PARM_DESC(ssp_max_occ_to, "SSP Max occupancy timeout (100us incr)");
 
-u16 stp_max_occ_to = 5;
+static u16 stp_max_occ_to = 5;
 module_param(stp_max_occ_to, ushort, 0);
 MODULE_PARM_DESC(stp_max_occ_to, "STP Max occupancy timeout (100us incr)");
 
-u16 ssp_inactive_to = 5;
+static u16 ssp_inactive_to = 5;
 module_param(ssp_inactive_to, ushort, 0);
 MODULE_PARM_DESC(ssp_inactive_to, "SSP inactivity timeout (100us incr)");
 
-u16 stp_inactive_to = 5;
+static u16 stp_inactive_to = 5;
 module_param(stp_inactive_to, ushort, 0);
 MODULE_PARM_DESC(stp_inactive_to, "STP inactivity timeout (100us incr)");
 
-unsigned char phy_gen = SCIC_SDS_PARM_GEN2_SPEED;
+static unsigned char phy_gen = SCIC_SDS_PARM_GEN2_SPEED;
 module_param(phy_gen, byte, 0);
 MODULE_PARM_DESC(phy_gen, "PHY generation (1: 1.5Gbps 2: 3.0Gbps 3: 6.0Gbps)");
 
-unsigned char max_concurr_spinup;
+static unsigned char max_concurr_spinup;
 module_param(max_concurr_spinup, byte, 0);
 MODULE_PARM_DESC(max_concurr_spinup, "Max concurrent device spinup");
 
@@ -758,6 +754,7 @@ static __exit void isci_exit(void)
 	sas_release_transport(isci_transport_template);
 }
 
+MODULE_DESCRIPTION("Intel(R) C600 Series Chipset SAS Controller driver");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_FIRMWARE(ISCI_FW_NAME);
 module_init(isci_init);

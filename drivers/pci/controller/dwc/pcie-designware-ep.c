@@ -16,30 +16,6 @@
 #include <linux/pci-epf.h>
 
 /**
- * dw_pcie_ep_linkup - Notify EPF drivers about Link Up event
- * @ep: DWC EP device
- */
-void dw_pcie_ep_linkup(struct dw_pcie_ep *ep)
-{
-	struct pci_epc *epc = ep->epc;
-
-	pci_epc_linkup(epc);
-}
-EXPORT_SYMBOL_GPL(dw_pcie_ep_linkup);
-
-/**
- * dw_pcie_ep_init_notify - Notify EPF drivers about EPC initialization complete
- * @ep: DWC EP device
- */
-void dw_pcie_ep_init_notify(struct dw_pcie_ep *ep)
-{
-	struct pci_epc *epc = ep->epc;
-
-	pci_epc_init_notify(epc);
-}
-EXPORT_SYMBOL_GPL(dw_pcie_ep_init_notify);
-
-/**
  * dw_pcie_ep_get_func_from_ep - Get the struct dw_pcie_ep_func corresponding to
  *				 the endpoint function
  * @ep: DWC EP device
@@ -93,38 +69,50 @@ void dw_pcie_ep_reset_bar(struct dw_pcie *pci, enum pci_barno bar)
 }
 EXPORT_SYMBOL_GPL(dw_pcie_ep_reset_bar);
 
-static u8 __dw_pcie_ep_find_next_cap(struct dw_pcie_ep *ep, u8 func_no,
-				     u8 cap_ptr, u8 cap)
-{
-	u8 cap_id, next_cap_ptr;
-	u16 reg;
-
-	if (!cap_ptr)
-		return 0;
-
-	reg = dw_pcie_ep_readw_dbi(ep, func_no, cap_ptr);
-	cap_id = (reg & 0x00ff);
-
-	if (cap_id > PCI_CAP_ID_MAX)
-		return 0;
-
-	if (cap_id == cap)
-		return cap_ptr;
-
-	next_cap_ptr = (reg & 0xff00) >> 8;
-	return __dw_pcie_ep_find_next_cap(ep, func_no, next_cap_ptr, cap);
-}
-
 static u8 dw_pcie_ep_find_capability(struct dw_pcie_ep *ep, u8 func_no, u8 cap)
 {
-	u8 next_cap_ptr;
-	u16 reg;
-
-	reg = dw_pcie_ep_readw_dbi(ep, func_no, PCI_CAPABILITY_LIST);
-	next_cap_ptr = (reg & 0x00ff);
-
-	return __dw_pcie_ep_find_next_cap(ep, func_no, next_cap_ptr, cap);
+	return PCI_FIND_NEXT_CAP(dw_pcie_ep_read_cfg, PCI_CAPABILITY_LIST,
+				 cap, ep, func_no);
 }
+
+/**
+ * dw_pcie_ep_hide_ext_capability - Hide a capability from the linked list
+ * @pci: DWC PCI device
+ * @prev_cap: Capability preceding the capability that should be hidden
+ * @cap: Capability that should be hidden
+ *
+ * Return: 0 if success, errno otherwise.
+ */
+int dw_pcie_ep_hide_ext_capability(struct dw_pcie *pci, u8 prev_cap, u8 cap)
+{
+	u16 prev_cap_offset, cap_offset;
+	u32 prev_cap_header, cap_header;
+
+	prev_cap_offset = dw_pcie_find_ext_capability(pci, prev_cap);
+	if (!prev_cap_offset)
+		return -EINVAL;
+
+	prev_cap_header = dw_pcie_readl_dbi(pci, prev_cap_offset);
+	cap_offset = PCI_EXT_CAP_NEXT(prev_cap_header);
+	cap_header = dw_pcie_readl_dbi(pci, cap_offset);
+
+	/* cap must immediately follow prev_cap. */
+	if (PCI_EXT_CAP_ID(cap_header) != cap)
+		return -EINVAL;
+
+	/* Clear next ptr. */
+	prev_cap_header &= ~GENMASK(31, 20);
+
+	/* Set next ptr to next ptr of cap. */
+	prev_cap_header |= cap_header & GENMASK(31, 20);
+
+	dw_pcie_dbi_ro_wr_en(pci);
+	dw_pcie_writel_dbi(pci, prev_cap_offset, prev_cap_header);
+	dw_pcie_dbi_ro_wr_dis(pci);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dw_pcie_ep_hide_ext_capability);
 
 static int dw_pcie_ep_write_header(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 				   struct pci_epf_header *hdr)
@@ -152,7 +140,8 @@ static int dw_pcie_ep_write_header(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 }
 
 static int dw_pcie_ep_inbound_atu(struct dw_pcie_ep *ep, u8 func_no, int type,
-				  dma_addr_t cpu_addr, enum pci_barno bar)
+				  dma_addr_t parent_bus_addr, enum pci_barno bar,
+				  size_t size)
 {
 	int ret;
 	u32 free_win;
@@ -161,7 +150,7 @@ static int dw_pcie_ep_inbound_atu(struct dw_pcie_ep *ep, u8 func_no, int type,
 	if (!ep->bar_to_atu[bar])
 		free_win = find_first_zero_bit(ep->ib_window_map, pci->num_ib_windows);
 	else
-		free_win = ep->bar_to_atu[bar];
+		free_win = ep->bar_to_atu[bar] - 1;
 
 	if (free_win >= pci->num_ib_windows) {
 		dev_err(pci->dev, "No free inbound window\n");
@@ -169,21 +158,24 @@ static int dw_pcie_ep_inbound_atu(struct dw_pcie_ep *ep, u8 func_no, int type,
 	}
 
 	ret = dw_pcie_prog_ep_inbound_atu(pci, func_no, free_win, type,
-					  cpu_addr, bar);
+					  parent_bus_addr, bar, size);
 	if (ret < 0) {
 		dev_err(pci->dev, "Failed to program IB window\n");
 		return ret;
 	}
 
-	ep->bar_to_atu[bar] = free_win;
+	/*
+	 * Always increment free_win before assignment, since value 0 is used to identify
+	 * unallocated mapping.
+	 */
+	ep->bar_to_atu[bar] = free_win + 1;
 	set_bit(free_win, ep->ib_window_map);
 
 	return 0;
 }
 
-static int dw_pcie_ep_outbound_atu(struct dw_pcie_ep *ep, u8 func_no,
-				   phys_addr_t phys_addr,
-				   u64 pci_addr, size_t size)
+static int dw_pcie_ep_outbound_atu(struct dw_pcie_ep *ep,
+				   struct dw_pcie_ob_atu_cfg *atu)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	u32 free_win;
@@ -195,13 +187,13 @@ static int dw_pcie_ep_outbound_atu(struct dw_pcie_ep *ep, u8 func_no,
 		return -EINVAL;
 	}
 
-	ret = dw_pcie_prog_ep_outbound_atu(pci, func_no, free_win, PCIE_ATU_TYPE_MEM,
-					   phys_addr, pci_addr, size);
+	atu->index = free_win;
+	ret = dw_pcie_prog_outbound_atu(pci, atu);
 	if (ret)
 		return ret;
 
 	set_bit(free_win, ep->ob_window_map);
-	ep->outbound_addr[free_win] = phys_addr;
+	ep->outbound_addr[free_win] = atu->parent_bus_addr;
 
 	return 0;
 }
@@ -212,7 +204,10 @@ static void dw_pcie_ep_clear_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	enum pci_barno bar = epf_bar->barno;
-	u32 atu_index = ep->bar_to_atu[bar];
+	u32 atu_index = ep->bar_to_atu[bar] - 1;
+
+	if (!ep->bar_to_atu[bar])
+		return;
 
 	__dw_pcie_ep_reset_bar(pci, func_no, bar, epf_bar->flags);
 
@@ -222,30 +217,96 @@ static void dw_pcie_ep_clear_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	ep->bar_to_atu[bar] = 0;
 }
 
-static int dw_pcie_ep_set_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
-			      struct pci_epf_bar *epf_bar)
+static unsigned int dw_pcie_ep_get_rebar_offset(struct dw_pcie *pci,
+						enum pci_barno bar)
 {
-	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
+	u32 reg, bar_index;
+	unsigned int offset, nbars;
+	int i;
+
+	offset = dw_pcie_find_ext_capability(pci, PCI_EXT_CAP_ID_REBAR);
+	if (!offset)
+		return offset;
+
+	reg = dw_pcie_readl_dbi(pci, offset + PCI_REBAR_CTRL);
+	nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, reg);
+
+	for (i = 0; i < nbars; i++, offset += PCI_REBAR_CTRL) {
+		reg = dw_pcie_readl_dbi(pci, offset + PCI_REBAR_CTRL);
+		bar_index = FIELD_GET(PCI_REBAR_CTRL_BAR_IDX, reg);
+		if (bar_index == bar)
+			return offset;
+	}
+
+	return 0;
+}
+
+static int dw_pcie_ep_set_bar_resizable(struct dw_pcie_ep *ep, u8 func_no,
+					struct pci_epf_bar *epf_bar)
+{
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	enum pci_barno bar = epf_bar->barno;
 	size_t size = epf_bar->size;
 	int flags = epf_bar->flags;
-	int ret, type;
-	u32 reg;
+	u32 reg = PCI_BASE_ADDRESS_0 + (4 * bar);
+	unsigned int rebar_offset;
+	u32 rebar_cap, rebar_ctrl;
+	int ret;
 
-	reg = PCI_BASE_ADDRESS_0 + (4 * bar);
+	rebar_offset = dw_pcie_ep_get_rebar_offset(pci, bar);
+	if (!rebar_offset)
+		return -EINVAL;
 
-	if (!(flags & PCI_BASE_ADDRESS_SPACE))
-		type = PCIE_ATU_TYPE_MEM;
-	else
-		type = PCIE_ATU_TYPE_IO;
-
-	ret = dw_pcie_ep_inbound_atu(ep, func_no, type, epf_bar->phys_addr, bar);
+	ret = pci_epc_bar_size_to_rebar_cap(size, &rebar_cap);
 	if (ret)
 		return ret;
 
-	if (ep->epf_bar[bar])
-		return 0;
+	dw_pcie_dbi_ro_wr_en(pci);
+
+	/*
+	 * A BAR mask should not be written for a resizable BAR. The BAR mask
+	 * is automatically derived by the controller every time the "selected
+	 * size" bits are updated, see "Figure 3-26 Resizable BAR Example for
+	 * 32-bit Memory BAR0" in DWC EP databook 5.96a. We simply need to write
+	 * BIT(0) to set the BAR enable bit.
+	 */
+	dw_pcie_ep_writel_dbi2(ep, func_no, reg, BIT(0));
+	dw_pcie_ep_writel_dbi(ep, func_no, reg, flags);
+
+	if (flags & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+		dw_pcie_ep_writel_dbi2(ep, func_no, reg + 4, 0);
+		dw_pcie_ep_writel_dbi(ep, func_no, reg + 4, 0);
+	}
+
+	/*
+	 * Bits 31:0 in PCI_REBAR_CAP define "supported sizes" bits for sizes
+	 * 1 MB to 128 TB. Bits 31:16 in PCI_REBAR_CTRL define "supported sizes"
+	 * bits for sizes 256 TB to 8 EB. Disallow sizes 256 TB to 8 EB.
+	 */
+	rebar_ctrl = dw_pcie_readl_dbi(pci, rebar_offset + PCI_REBAR_CTRL);
+	rebar_ctrl &= ~GENMASK(31, 16);
+	dw_pcie_writel_dbi(pci, rebar_offset + PCI_REBAR_CTRL, rebar_ctrl);
+
+	/*
+	 * The "selected size" (bits 13:8) in PCI_REBAR_CTRL are automatically
+	 * updated when writing PCI_REBAR_CAP, see "Figure 3-26 Resizable BAR
+	 * Example for 32-bit Memory BAR0" in DWC EP databook 5.96a.
+	 */
+	dw_pcie_writel_dbi(pci, rebar_offset + PCI_REBAR_CAP, rebar_cap);
+
+	dw_pcie_dbi_ro_wr_dis(pci);
+
+	return 0;
+}
+
+static int dw_pcie_ep_set_bar_programmable(struct dw_pcie_ep *ep, u8 func_no,
+					   struct pci_epf_bar *epf_bar)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	enum pci_barno bar = epf_bar->barno;
+	size_t size = epf_bar->size;
+	int flags = epf_bar->flags;
+	u32 reg = PCI_BASE_ADDRESS_0 + (4 * bar);
 
 	dw_pcie_dbi_ro_wr_en(pci);
 
@@ -257,8 +318,102 @@ static int dw_pcie_ep_set_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		dw_pcie_ep_writel_dbi(ep, func_no, reg + 4, 0);
 	}
 
-	ep->epf_bar[bar] = epf_bar;
 	dw_pcie_dbi_ro_wr_dis(pci);
+
+	return 0;
+}
+
+static enum pci_epc_bar_type dw_pcie_ep_get_bar_type(struct dw_pcie_ep *ep,
+						     enum pci_barno bar)
+{
+	const struct pci_epc_features *epc_features;
+
+	if (!ep->ops->get_features)
+		return BAR_PROGRAMMABLE;
+
+	epc_features = ep->ops->get_features(ep);
+
+	return epc_features->bar[bar].type;
+}
+
+static int dw_pcie_ep_set_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
+			      struct pci_epf_bar *epf_bar)
+{
+	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	enum pci_barno bar = epf_bar->barno;
+	size_t size = epf_bar->size;
+	enum pci_epc_bar_type bar_type;
+	int flags = epf_bar->flags;
+	int ret, type;
+
+	/*
+	 * DWC does not allow BAR pairs to overlap, e.g. you cannot combine BARs
+	 * 1 and 2 to form a 64-bit BAR.
+	 */
+	if ((flags & PCI_BASE_ADDRESS_MEM_TYPE_64) && (bar & 1))
+		return -EINVAL;
+
+	/*
+	 * Certain EPF drivers dynamically change the physical address of a BAR
+	 * (i.e. they call set_bar() twice, without ever calling clear_bar(), as
+	 * calling clear_bar() would clear the BAR's PCI address assigned by the
+	 * host).
+	 */
+	if (ep->epf_bar[bar]) {
+		/*
+		 * We can only dynamically change a BAR if the new BAR size and
+		 * BAR flags do not differ from the existing configuration.
+		 */
+		if (ep->epf_bar[bar]->barno != bar ||
+		    ep->epf_bar[bar]->size != size ||
+		    ep->epf_bar[bar]->flags != flags)
+			return -EINVAL;
+
+		/*
+		 * When dynamically changing a BAR, skip writing the BAR reg, as
+		 * that would clear the BAR's PCI address assigned by the host.
+		 */
+		goto config_atu;
+	}
+
+	bar_type = dw_pcie_ep_get_bar_type(ep, bar);
+	switch (bar_type) {
+	case BAR_FIXED:
+		/*
+		 * There is no need to write a BAR mask for a fixed BAR (except
+		 * to write 1 to the LSB of the BAR mask register, to enable the
+		 * BAR). Write the BAR mask regardless. (The fixed bits in the
+		 * BAR mask register will be read-only anyway.)
+		 */
+		fallthrough;
+	case BAR_PROGRAMMABLE:
+		ret = dw_pcie_ep_set_bar_programmable(ep, func_no, epf_bar);
+		break;
+	case BAR_RESIZABLE:
+		ret = dw_pcie_ep_set_bar_resizable(ep, func_no, epf_bar);
+		break;
+	default:
+		ret = -EINVAL;
+		dev_err(pci->dev, "Invalid BAR type\n");
+		break;
+	}
+
+	if (ret)
+		return ret;
+
+config_atu:
+	if (!(flags & PCI_BASE_ADDRESS_SPACE))
+		type = PCIE_ATU_TYPE_MEM;
+	else
+		type = PCIE_ATU_TYPE_IO;
+
+	ret = dw_pcie_ep_inbound_atu(ep, func_no, type, epf_bar->phys_addr, bar,
+				     size);
+	if (ret)
+		return ret;
+
+	ep->epf_bar[bar] = epf_bar;
 
 	return 0;
 }
@@ -269,7 +424,7 @@ static int dw_pcie_find_index(struct dw_pcie_ep *ep, phys_addr_t addr,
 	u32 index;
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 
-	for (index = 0; index < pci->num_ob_windows; index++) {
+	for_each_set_bit(index, ep->ob_window_map, pci->num_ob_windows) {
 		if (ep->outbound_addr[index] != addr)
 			continue;
 		*atu_index = index;
@@ -277,6 +432,20 @@ static int dw_pcie_find_index(struct dw_pcie_ep *ep, phys_addr_t addr,
 	}
 
 	return -EINVAL;
+}
+
+static u64 dw_pcie_ep_align_addr(struct pci_epc *epc, u64 pci_addr,
+				 size_t *pci_size, size_t *offset)
+{
+	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	u64 mask = pci->region_align - 1;
+	size_t ofst = pci_addr & mask;
+
+	*pci_size = ALIGN(ofst + *pci_size, epc->mem->window.page_size);
+	*offset = ofst;
+
+	return pci_addr & ~mask;
 }
 
 static void dw_pcie_ep_unmap_addr(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
@@ -287,10 +456,12 @@ static void dw_pcie_ep_unmap_addr(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 
-	ret = dw_pcie_find_index(ep, addr, &atu_index);
+	ret = dw_pcie_find_index(ep, addr - pci->parent_bus_offset,
+				 &atu_index);
 	if (ret < 0)
 		return;
 
+	ep->outbound_addr[atu_index] = 0;
 	dw_pcie_disable_atu(pci, PCIE_ATU_REGION_DIR_OB, atu_index);
 	clear_bit(atu_index, ep->ob_window_map);
 }
@@ -301,8 +472,14 @@ static int dw_pcie_ep_map_addr(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	int ret;
 	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	struct dw_pcie_ob_atu_cfg atu = { 0 };
 
-	ret = dw_pcie_ep_outbound_atu(ep, func_no, addr, pci_addr, size);
+	atu.func_no = func_no;
+	atu.type = PCIE_ATU_TYPE_MEM;
+	atu.parent_bus_addr = addr - pci->parent_bus_offset;
+	atu.pci_addr = pci_addr;
+	atu.size = size;
+	ret = dw_pcie_ep_outbound_atu(ep, &atu);
 	if (ret) {
 		dev_err(pci->dev, "Failed to enable address\n");
 		return ret;
@@ -328,15 +505,16 @@ static int dw_pcie_ep_get_msi(struct pci_epc *epc, u8 func_no, u8 vfunc_no)
 
 	val = FIELD_GET(PCI_MSI_FLAGS_QSIZE, val);
 
-	return val;
+	return 1 << val;
 }
 
 static int dw_pcie_ep_set_msi(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
-			      u8 interrupts)
+			      u8 nr_irqs)
 {
 	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct dw_pcie_ep_func *ep_func;
+	u8 mmc = order_base_2(nr_irqs);
 	u32 val, reg;
 
 	ep_func = dw_pcie_ep_get_func_from_ep(ep, func_no);
@@ -346,7 +524,7 @@ static int dw_pcie_ep_set_msi(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	reg = ep_func->msi_cap + PCI_MSI_FLAGS;
 	val = dw_pcie_ep_readw_dbi(ep, func_no, reg);
 	val &= ~PCI_MSI_FLAGS_QMASK;
-	val |= FIELD_PREP(PCI_MSI_FLAGS_QMASK, interrupts);
+	val |= FIELD_PREP(PCI_MSI_FLAGS_QMASK, mmc);
 	dw_pcie_dbi_ro_wr_en(pci);
 	dw_pcie_ep_writew_dbi(ep, func_no, reg, val);
 	dw_pcie_dbi_ro_wr_dis(pci);
@@ -371,11 +549,11 @@ static int dw_pcie_ep_get_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no)
 
 	val &= PCI_MSIX_FLAGS_QSIZE;
 
-	return val;
+	return val + 1;
 }
 
 static int dw_pcie_ep_set_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
-			       u16 interrupts, enum pci_barno bir, u32 offset)
+			       u16 nr_irqs, enum pci_barno bir, u32 offset)
 {
 	struct dw_pcie_ep *ep = epc_get_drvdata(epc);
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
@@ -391,7 +569,7 @@ static int dw_pcie_ep_set_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	reg = ep_func->msix_cap + PCI_MSIX_FLAGS;
 	val = dw_pcie_ep_readw_dbi(ep, func_no, reg);
 	val &= ~PCI_MSIX_FLAGS_QSIZE;
-	val |= interrupts;
+	val |= nr_irqs - 1; /* encoded as N-1 */
 	dw_pcie_writew_dbi(pci, reg, val);
 
 	reg = ep_func->msix_cap + PCI_MSIX_TABLE;
@@ -399,7 +577,7 @@ static int dw_pcie_ep_set_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 	dw_pcie_ep_writel_dbi(ep, func_no, reg, val);
 
 	reg = ep_func->msix_cap + PCI_MSIX_PBA;
-	val = (offset + (interrupts * PCI_MSIX_ENTRY_SIZE)) | bir;
+	val = (offset + (nr_irqs * PCI_MSIX_ENTRY_SIZE)) | bir;
 	dw_pcie_ep_writel_dbi(ep, func_no, reg, val);
 
 	dw_pcie_dbi_ro_wr_dis(pci);
@@ -449,6 +627,7 @@ static const struct pci_epc_ops epc_ops = {
 	.write_header		= dw_pcie_ep_write_header,
 	.set_bar		= dw_pcie_ep_set_bar,
 	.clear_bar		= dw_pcie_ep_clear_bar,
+	.align_addr		= dw_pcie_ep_align_addr,
 	.map_addr		= dw_pcie_ep_map_addr,
 	.unmap_addr		= dw_pcie_ep_unmap_addr,
 	.set_msi		= dw_pcie_ep_set_msi,
@@ -466,7 +645,7 @@ static const struct pci_epc_ops epc_ops = {
  * @ep: DWC EP device
  * @func_no: Function number of the endpoint
  *
- * Return: 0 if success, errono otherwise.
+ * Return: 0 if success, errno otherwise.
  */
 int dw_pcie_ep_raise_intx_irq(struct dw_pcie_ep *ep, u8 func_no)
 {
@@ -485,7 +664,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_ep_raise_intx_irq);
  * @func_no: Function number of the endpoint
  * @interrupt_num: Interrupt number to be raised
  *
- * Return: 0 if success, errono otherwise.
+ * Return: 0 if success, errno otherwise.
  */
 int dw_pcie_ep_raise_msi_irq(struct dw_pcie_ep *ep, u8 func_no,
 			     u8 interrupt_num)
@@ -493,7 +672,8 @@ int dw_pcie_ep_raise_msi_irq(struct dw_pcie_ep *ep, u8 func_no,
 	u32 msg_addr_lower, msg_addr_upper, reg;
 	struct dw_pcie_ep_func *ep_func;
 	struct pci_epc *epc = ep->epc;
-	unsigned int aligned_offset;
+	size_t map_size = sizeof(u32);
+	size_t offset;
 	u16 msg_ctrl, msg_data;
 	bool has_upper;
 	u64 msg_addr;
@@ -521,14 +701,13 @@ int dw_pcie_ep_raise_msi_irq(struct dw_pcie_ep *ep, u8 func_no,
 	}
 	msg_addr = ((u64)msg_addr_upper) << 32 | msg_addr_lower;
 
-	aligned_offset = msg_addr & (epc->mem->window.page_size - 1);
-	msg_addr = ALIGN_DOWN(msg_addr, epc->mem->window.page_size);
+	msg_addr = dw_pcie_ep_align_addr(epc, msg_addr, &map_size, &offset);
 	ret = dw_pcie_ep_map_addr(epc, func_no, 0, ep->msi_mem_phys, msg_addr,
-				  epc->mem->window.page_size);
+				  map_size);
 	if (ret)
 		return ret;
 
-	writel(msg_data | (interrupt_num - 1), ep->msi_mem + aligned_offset);
+	writel(msg_data | (interrupt_num - 1), ep->msi_mem + offset);
 
 	dw_pcie_ep_unmap_addr(epc, func_no, 0, ep->msi_mem_phys);
 
@@ -579,8 +758,9 @@ int dw_pcie_ep_raise_msix_irq(struct dw_pcie_ep *ep, u8 func_no,
 	struct pci_epf_msix_tbl *msix_tbl;
 	struct dw_pcie_ep_func *ep_func;
 	struct pci_epc *epc = ep->epc;
+	size_t map_size = sizeof(u32);
+	size_t offset;
 	u32 reg, msg_data, vec_ctrl;
-	unsigned int aligned_offset;
 	u32 tbl_offset;
 	u64 msg_addr;
 	int ret;
@@ -605,19 +785,19 @@ int dw_pcie_ep_raise_msix_irq(struct dw_pcie_ep *ep, u8 func_no,
 		return -EPERM;
 	}
 
-	aligned_offset = msg_addr & (epc->mem->window.page_size - 1);
-	msg_addr = ALIGN_DOWN(msg_addr, epc->mem->window.page_size);
+	msg_addr = dw_pcie_ep_align_addr(epc, msg_addr, &map_size, &offset);
 	ret = dw_pcie_ep_map_addr(epc, func_no, 0, ep->msi_mem_phys, msg_addr,
-				  epc->mem->window.page_size);
+				  map_size);
 	if (ret)
 		return ret;
 
-	writel(msg_data, ep->msi_mem + aligned_offset);
+	writel(msg_data, ep->msi_mem + offset);
 
 	dw_pcie_ep_unmap_addr(epc, func_no, 0, ep->msi_mem_phys);
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dw_pcie_ep_raise_msix_irq);
 
 /**
  * dw_pcie_ep_cleanup - Cleanup DWC EP resources after fundamental reset
@@ -631,8 +811,8 @@ void dw_pcie_ep_cleanup(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 
+	dwc_pcie_debugfs_deinit(pci);
 	dw_pcie_edma_remove(pci);
-	ep->epc->init_complete = false;
 }
 EXPORT_SYMBOL_GPL(dw_pcie_ep_cleanup);
 
@@ -656,22 +836,53 @@ void dw_pcie_ep_deinit(struct dw_pcie_ep *ep)
 }
 EXPORT_SYMBOL_GPL(dw_pcie_ep_deinit);
 
-static unsigned int dw_pcie_ep_find_ext_capability(struct dw_pcie *pci, int cap)
+static void dw_pcie_ep_init_non_sticky_registers(struct dw_pcie *pci)
 {
-	u32 header;
-	int pos = PCI_CFG_SPACE_SIZE;
+	struct dw_pcie_ep *ep = &pci->ep;
+	unsigned int offset;
+	unsigned int nbars;
+	enum pci_barno bar;
+	u32 reg, i, val;
 
-	while (pos) {
-		header = dw_pcie_readl_dbi(pci, pos);
-		if (PCI_EXT_CAP_ID(header) == cap)
-			return pos;
+	offset = dw_pcie_find_ext_capability(pci, PCI_EXT_CAP_ID_REBAR);
 
-		pos = PCI_EXT_CAP_NEXT(header);
-		if (!pos)
-			break;
+	dw_pcie_dbi_ro_wr_en(pci);
+
+	if (offset) {
+		reg = dw_pcie_readl_dbi(pci, offset + PCI_REBAR_CTRL);
+		nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, reg);
+
+		/*
+		 * PCIe r6.0, sec 7.8.6.2 require us to support at least one
+		 * size in the range from 1 MB to 512 GB. Advertise support
+		 * for 1 MB BAR size only.
+		 *
+		 * For a BAR that has been configured via dw_pcie_ep_set_bar(),
+		 * advertise support for only that size instead.
+		 */
+		for (i = 0; i < nbars; i++, offset += PCI_REBAR_CTRL) {
+			/*
+			 * While the RESBAR_CAP_REG_* fields are sticky, the
+			 * RESBAR_CTRL_REG_BAR_SIZE field is non-sticky (it is
+			 * sticky in certain versions of DWC PCIe, but not all).
+			 *
+			 * RESBAR_CTRL_REG_BAR_SIZE is updated automatically by
+			 * the controller when RESBAR_CAP_REG is written, which
+			 * is why RESBAR_CAP_REG is written here.
+			 */
+			val = dw_pcie_readl_dbi(pci, offset + PCI_REBAR_CTRL);
+			bar = FIELD_GET(PCI_REBAR_CTRL_BAR_IDX, val);
+			if (ep->epf_bar[bar])
+				pci_epc_bar_size_to_rebar_cap(ep->epf_bar[bar]->size, &val);
+			else
+				val = BIT(4);
+
+			dw_pcie_writel_dbi(pci, offset + PCI_REBAR_CAP, val);
+		}
 	}
 
-	return 0;
+	dw_pcie_setup(pci);
+	dw_pcie_dbi_ro_wr_dis(pci);
 }
 
 /**
@@ -688,13 +899,11 @@ int dw_pcie_ep_init_registers(struct dw_pcie_ep *ep)
 	struct dw_pcie_ep_func *ep_func;
 	struct device *dev = pci->dev;
 	struct pci_epc *epc = ep->epc;
-	unsigned int offset, ptm_cap_base;
-	unsigned int nbars;
+	u32 ptm_cap_base, reg;
 	u8 hdr_type;
 	u8 func_no;
-	int i, ret;
 	void *addr;
-	u32 reg;
+	int ret;
 
 	hdr_type = dw_pcie_readb_dbi(pci, PCI_HEADER_TYPE) &
 		   PCI_HEADER_TYPE_MASK;
@@ -713,6 +922,7 @@ int dw_pcie_ep_init_registers(struct dw_pcie_ep *ep)
 	if (ret)
 		return ret;
 
+	ret = -ENOMEM;
 	if (!ep->ib_window_map) {
 		ep->ib_window_map = devm_bitmap_zalloc(dev, pci->num_ib_windows,
 						       GFP_KERNEL);
@@ -757,24 +967,7 @@ int dw_pcie_ep_init_registers(struct dw_pcie_ep *ep)
 	if (ep->ops->init)
 		ep->ops->init(ep);
 
-	offset = dw_pcie_ep_find_ext_capability(pci, PCI_EXT_CAP_ID_REBAR);
-	ptm_cap_base = dw_pcie_ep_find_ext_capability(pci, PCI_EXT_CAP_ID_PTM);
-
-	dw_pcie_dbi_ro_wr_en(pci);
-
-	if (offset) {
-		reg = dw_pcie_readl_dbi(pci, offset + PCI_REBAR_CTRL);
-		nbars = (reg & PCI_REBAR_CTRL_NBAR_MASK) >>
-			PCI_REBAR_CTRL_NBAR_SHIFT;
-
-		/*
-		 * PCIe r6.0, sec 7.8.6.2 require us to support at least one
-		 * size in the range from 1 MB to 512 GB. Advertise support
-		 * for 1 MB BAR size only.
-		 */
-		for (i = 0; i < nbars; i++, offset += PCI_REBAR_CTRL)
-			dw_pcie_writel_dbi(pci, offset + PCI_REBAR_CAP, BIT(4));
-	}
+	ptm_cap_base = dw_pcie_find_ext_capability(pci, PCI_EXT_CAP_ID_PTM);
 
 	/*
 	 * PTM responder capability can be disabled only after disabling
@@ -792,8 +985,9 @@ int dw_pcie_ep_init_registers(struct dw_pcie_ep *ep)
 		dw_pcie_dbi_ro_wr_dis(pci);
 	}
 
-	dw_pcie_setup(pci);
-	dw_pcie_dbi_ro_wr_dis(pci);
+	dw_pcie_ep_init_non_sticky_registers(pci);
+
+	dwc_pcie_debugfs_init(pci, DW_PCIE_EP_TYPE);
 
 	return 0;
 
@@ -803,6 +997,78 @@ err_remove_edma:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dw_pcie_ep_init_registers);
+
+/**
+ * dw_pcie_ep_linkup - Notify EPF drivers about Link Up event
+ * @ep: DWC EP device
+ */
+void dw_pcie_ep_linkup(struct dw_pcie_ep *ep)
+{
+	struct pci_epc *epc = ep->epc;
+
+	pci_epc_linkup(epc);
+}
+EXPORT_SYMBOL_GPL(dw_pcie_ep_linkup);
+
+/**
+ * dw_pcie_ep_linkdown - Notify EPF drivers about Link Down event
+ * @ep: DWC EP device
+ *
+ * Non-sticky registers are also initialized before sending the notification to
+ * the EPF drivers. This is needed since the registers need to be initialized
+ * before the link comes back again.
+ */
+void dw_pcie_ep_linkdown(struct dw_pcie_ep *ep)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	struct pci_epc *epc = ep->epc;
+
+	/*
+	 * Initialize the non-sticky DWC registers as they would've reset post
+	 * Link Down. This is specifically needed for drivers not supporting
+	 * PERST# as they have no way to reinitialize the registers before the
+	 * link comes back again.
+	 */
+	dw_pcie_ep_init_non_sticky_registers(pci);
+
+	pci_epc_linkdown(epc);
+}
+EXPORT_SYMBOL_GPL(dw_pcie_ep_linkdown);
+
+static int dw_pcie_ep_get_resources(struct dw_pcie_ep *ep)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	struct device *dev = pci->dev;
+	struct platform_device *pdev = to_platform_device(dev);
+	struct device_node *np = dev->of_node;
+	struct pci_epc *epc = ep->epc;
+	struct resource *res;
+	int ret;
+
+	ret = dw_pcie_get_resources(pci);
+	if (ret)
+		return ret;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "addr_space");
+	if (!res)
+		return -EINVAL;
+
+	ep->phys_base = res->start;
+	ep->addr_size = resource_size(res);
+
+	/*
+	 * artpec6_pcie_cpu_addr_fixup() uses ep->phys_base, so call
+	 * dw_pcie_parent_bus_offset() after setting ep->phys_base.
+	 */
+	pci->parent_bus_offset = dw_pcie_parent_bus_offset(pci, "addr_space",
+							   ep->phys_base);
+
+	ret = of_property_read_u8(np, "max-functions", &epc->max_functions);
+	if (ret < 0)
+		epc->max_functions = 1;
+
+	return 0;
+}
 
 /**
  * dw_pcie_ep_init - Initialize the endpoint device
@@ -816,28 +1082,11 @@ EXPORT_SYMBOL_GPL(dw_pcie_ep_init_registers);
 int dw_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	int ret;
-	struct resource *res;
 	struct pci_epc *epc;
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct device *dev = pci->dev;
-	struct platform_device *pdev = to_platform_device(dev);
-	struct device_node *np = dev->of_node;
 
 	INIT_LIST_HEAD(&ep->func_list);
-
-	ret = dw_pcie_get_resources(pci);
-	if (ret)
-		return ret;
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "addr_space");
-	if (!res)
-		return -EINVAL;
-
-	ep->phys_base = res->start;
-	ep->addr_size = resource_size(res);
-
-	if (ep->ops->pre_init)
-		ep->ops->pre_init(ep);
 
 	epc = devm_pci_epc_create(dev, &epc_ops);
 	if (IS_ERR(epc)) {
@@ -848,9 +1097,12 @@ int dw_pcie_ep_init(struct dw_pcie_ep *ep)
 	ep->epc = epc;
 	epc_set_drvdata(epc, ep);
 
-	ret = of_property_read_u8(np, "max-functions", &epc->max_functions);
-	if (ret < 0)
-		epc->max_functions = 1;
+	ret = dw_pcie_ep_get_resources(ep);
+	if (ret)
+		return ret;
+
+	if (ep->ops->pre_init)
+		ep->ops->pre_init(ep);
 
 	ret = pci_epc_mem_init(epc, ep->phys_base, ep->addr_size,
 			       ep->page_size);

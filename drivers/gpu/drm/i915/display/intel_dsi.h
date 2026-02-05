@@ -66,7 +66,7 @@ struct intel_dsi {
 	/* number of DSI lanes */
 	unsigned int lane_count;
 
-	/* i2c bus associated with the slave device */
+	/* i2c bus associated with the target device */
 	int i2c_bus_num;
 
 	/*
@@ -165,7 +165,7 @@ enum drm_panel_orientation
 intel_dsi_get_panel_orientation(struct intel_connector *connector);
 int intel_dsi_get_modes(struct drm_connector *connector);
 enum drm_mode_status intel_dsi_mode_valid(struct drm_connector *connector,
-					  struct drm_display_mode *mode);
+					  const struct drm_display_mode *mode);
 struct intel_dsi_host *intel_dsi_host_init(struct intel_dsi *intel_dsi,
 					   const struct mipi_dsi_host_ops *funcs,
 					   enum port port);

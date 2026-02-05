@@ -50,7 +50,7 @@ struct wcd_mbhc {
 	struct wcd_mbhc_config *cfg;
 	const struct wcd_mbhc_cb *mbhc_cb;
 	const struct wcd_mbhc_intr *intr_ids;
-	struct wcd_mbhc_field *fields;
+	const struct wcd_mbhc_field *fields;
 	/* Delayed work to report long button press */
 	struct delayed_work mbhc_btn_dwork;
 	/* Work to handle plug report */
@@ -825,7 +825,6 @@ static int wcd_mbhc_initialise(struct wcd_mbhc *mbhc)
 
 	mutex_unlock(&mbhc->lock);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 
 	return 0;
@@ -1260,7 +1259,7 @@ correct_plug_type:
 			if (pt_gnd_mic_swap_cnt == mbhc->swap_thr) {
 				/* US_EU gpio present, flip switch */
 				if (mbhc->cfg->swap_gnd_mic) {
-					if (mbhc->cfg->swap_gnd_mic(component, true))
+					if (mbhc->cfg->swap_gnd_mic(component))
 						continue;
 				}
 			}
@@ -1319,7 +1318,6 @@ exit:
 	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
 		mbhc->mbhc_cb->hph_pull_down_ctrl(component, true);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 }
 
@@ -1505,7 +1503,7 @@ EXPORT_SYMBOL(wcd_dt_parse_mbhc_data);
 struct wcd_mbhc *wcd_mbhc_init(struct snd_soc_component *component,
 			       const struct wcd_mbhc_cb *mbhc_cb,
 			       const struct wcd_mbhc_intr *intr_ids,
-			       struct wcd_mbhc_field *fields,
+			       const struct wcd_mbhc_field *fields,
 			       bool impedance_det_en)
 {
 	struct device *dev = component->dev;

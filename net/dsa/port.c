@@ -116,19 +116,15 @@ static bool dsa_port_can_configure_learning(struct dsa_port *dp)
 
 bool dsa_port_supports_hwtstamp(struct dsa_port *dp)
 {
+	struct kernel_hwtstamp_config config = {};
 	struct dsa_switch *ds = dp->ds;
-	struct ifreq ifr = {};
 	int err;
 
 	if (!ds->ops->port_hwtstamp_get || !ds->ops->port_hwtstamp_set)
 		return false;
 
-	/* "See through" shim implementations of the "get" method.
-	 * Since we can't cook up a complete ioctl request structure, this will
-	 * fail in copy_to_user() with -EFAULT, which hopefully is enough to
-	 * detect a valid implementation.
-	 */
-	err = ds->ops->port_hwtstamp_get(ds, dp->index, &ifr);
+	/* "See through" shim implementations of the "get" method. */
+	err = ds->ops->port_hwtstamp_get(ds, dp->index, &config);
 	return err != -EOPNOTSUPP;
 }
 
@@ -1467,9 +1463,33 @@ int dsa_port_change_conduit(struct dsa_port *dp, struct net_device *conduit,
 	 */
 	dsa_user_unsync_ha(dev);
 
+	/* If live-changing, we also need to uninstall the user device address
+	 * from the port FDB and the conduit interface.
+	 */
+	if (dev->flags & IFF_UP)
+		dsa_user_host_uc_uninstall(dev);
+
 	err = dsa_port_assign_conduit(dp, conduit, extack, true);
 	if (err)
 		goto rewind_old_addrs;
+
+	/* If the port doesn't have its own MAC address and relies on the DSA
+	 * conduit's one, inherit it again from the new DSA conduit.
+	 */
+	if (is_zero_ether_addr(dp->mac))
+		eth_hw_addr_inherit(dev, conduit);
+
+	/* If live-changing, we need to install the user device address to the
+	 * port FDB and the conduit interface.
+	 */
+	if (dev->flags & IFF_UP) {
+		err = dsa_user_host_uc_install(dev, dev->dev_addr);
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Failed to install host UC address");
+			goto rewind_addr_inherit;
+		}
+	}
 
 	dsa_user_sync_ha(dev);
 
@@ -1500,10 +1520,26 @@ rewind_new_vlan:
 rewind_new_addrs:
 	dsa_user_unsync_ha(dev);
 
+	if (dev->flags & IFF_UP)
+		dsa_user_host_uc_uninstall(dev);
+
+rewind_addr_inherit:
+	if (is_zero_ether_addr(dp->mac))
+		eth_hw_addr_inherit(dev, old_conduit);
+
 	dsa_port_assign_conduit(dp, old_conduit, NULL, false);
 
 /* Restore the objects on the old CPU port */
 rewind_old_addrs:
+	if (dev->flags & IFF_UP) {
+		tmp = dsa_user_host_uc_install(dev, dev->dev_addr);
+		if (tmp) {
+			dev_err(ds->dev,
+				"port %d failed to restore host UC address: %pe\n",
+				dp->index, ERR_PTR(tmp));
+		}
+	}
+
 	dsa_user_sync_ha(dev);
 
 	if (vlan_filtering) {
@@ -1535,74 +1571,32 @@ void dsa_port_set_tag_protocol(struct dsa_port *cpu_dp,
 	cpu_dp->tag_ops = tag_ops;
 }
 
-static struct phylink_pcs *
-dsa_port_phylink_mac_select_pcs(struct phylink_config *config,
-				phy_interface_t interface)
+/* dsa_supports_eee - indicate that EEE is supported
+ * @ds: pointer to &struct dsa_switch
+ * @port: port index
+ *
+ * A default implementation for the .support_eee() DSA operations member,
+ * which drivers can use to indicate that they support EEE on all of their
+ * user ports.
+ *
+ * Returns: true
+ */
+bool dsa_supports_eee(struct dsa_switch *ds, int port)
 {
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct phylink_pcs *pcs = ERR_PTR(-EOPNOTSUPP);
-	struct dsa_switch *ds = dp->ds;
-
-	if (ds->ops->phylink_mac_select_pcs)
-		pcs = ds->ops->phylink_mac_select_pcs(ds, dp->index, interface);
-
-	return pcs;
+	return true;
 }
-
-static int dsa_port_phylink_mac_prepare(struct phylink_config *config,
-					unsigned int mode,
-					phy_interface_t interface)
-{
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct dsa_switch *ds = dp->ds;
-	int err = 0;
-
-	if (ds->ops->phylink_mac_prepare)
-		err = ds->ops->phylink_mac_prepare(ds, dp->index, mode,
-						   interface);
-
-	return err;
-}
+EXPORT_SYMBOL_GPL(dsa_supports_eee);
 
 static void dsa_port_phylink_mac_config(struct phylink_config *config,
 					unsigned int mode,
 					const struct phylink_link_state *state)
 {
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct dsa_switch *ds = dp->ds;
-
-	if (!ds->ops->phylink_mac_config)
-		return;
-
-	ds->ops->phylink_mac_config(ds, dp->index, mode, state);
-}
-
-static int dsa_port_phylink_mac_finish(struct phylink_config *config,
-				       unsigned int mode,
-				       phy_interface_t interface)
-{
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct dsa_switch *ds = dp->ds;
-	int err = 0;
-
-	if (ds->ops->phylink_mac_finish)
-		err = ds->ops->phylink_mac_finish(ds, dp->index, mode,
-						  interface);
-
-	return err;
 }
 
 static void dsa_port_phylink_mac_link_down(struct phylink_config *config,
 					   unsigned int mode,
 					   phy_interface_t interface)
 {
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct dsa_switch *ds = dp->ds;
-
-	if (!ds->ops->phylink_mac_link_down)
-		return;
-
-	ds->ops->phylink_mac_link_down(ds, dp->index, mode, interface);
 }
 
 static void dsa_port_phylink_mac_link_up(struct phylink_config *config,
@@ -1612,21 +1606,10 @@ static void dsa_port_phylink_mac_link_up(struct phylink_config *config,
 					 int speed, int duplex,
 					 bool tx_pause, bool rx_pause)
 {
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct dsa_switch *ds = dp->ds;
-
-	if (!ds->ops->phylink_mac_link_up)
-		return;
-
-	ds->ops->phylink_mac_link_up(ds, dp->index, mode, interface, phydev,
-				     speed, duplex, tx_pause, rx_pause);
 }
 
 static const struct phylink_mac_ops dsa_port_phylink_mac_ops = {
-	.mac_select_pcs = dsa_port_phylink_mac_select_pcs,
-	.mac_prepare = dsa_port_phylink_mac_prepare,
 	.mac_config = dsa_port_phylink_mac_config,
-	.mac_finish = dsa_port_phylink_mac_finish,
 	.mac_link_down = dsa_port_phylink_mac_link_down,
 	.mac_link_up = dsa_port_phylink_mac_link_up,
 };
@@ -1863,9 +1846,6 @@ static void dsa_shared_port_link_down(struct dsa_port *dp)
 	if (ds->phylink_mac_ops && ds->phylink_mac_ops->mac_link_down)
 		ds->phylink_mac_ops->mac_link_down(&dp->pl_config, MLO_AN_FIXED,
 						   PHY_INTERFACE_MODE_NA);
-	else if (ds->ops->phylink_mac_link_down)
-		ds->ops->phylink_mac_link_down(ds, dp->index, MLO_AN_FIXED,
-					       PHY_INTERFACE_MODE_NA);
 }
 
 int dsa_shared_port_link_register_of(struct dsa_port *dp)
@@ -1928,6 +1908,9 @@ void dsa_port_hsr_leave(struct dsa_port *dp, struct net_device *hsr)
 {
 	struct dsa_switch *ds = dp->ds;
 	int err;
+
+	if (!dp->hsr_dev)
+		return;
 
 	dp->hsr_dev = NULL;
 

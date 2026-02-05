@@ -28,6 +28,7 @@ static int tcp_adv_win_scale_max = 31;
 static int tcp_app_win_max = 31;
 static int tcp_min_snd_mss_min = TCP_MIN_SND_MSS;
 static int tcp_min_snd_mss_max = 65535;
+static int tcp_rto_max_max = TCP_RTO_MAX_SEC * MSEC_PER_SEC;
 static int ip_privileged_port_min;
 static int ip_privileged_port_max = 65535;
 static int ip_ttl_min = 1;
@@ -45,6 +46,10 @@ static unsigned int tcp_child_ehash_entries_max = 16 * 1024 * 1024;
 static unsigned int udp_child_hash_entries_max = UDP_HTABLE_SIZE_MAX;
 static int tcp_plb_max_rounds = 31;
 static int tcp_plb_max_cong_thresh = 256;
+static unsigned int tcp_tw_reuse_delay_max = TCP_PAWS_MSL * MSEC_PER_SEC;
+static int tcp_ecn_mode_max = 2;
+static u32 icmp_errors_extension_mask_all =
+	GENMASK_U8(ICMP_ERR_EXT_COUNT - 1, 0);
 
 /* obsolete */
 static int sysctl_tcp_low_latency __read_mostly;
@@ -62,7 +67,7 @@ static void set_local_port_range(struct net *net, unsigned int low, unsigned int
 }
 
 /* Validate changes from /proc interface. */
-static int ipv4_local_port_range(struct ctl_table *table, int write,
+static int ipv4_local_port_range(const struct ctl_table *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = table->data;
@@ -96,7 +101,7 @@ static int ipv4_local_port_range(struct ctl_table *table, int write,
 }
 
 /* Validate changes from /proc interface. */
-static int ipv4_privileged_ports(struct ctl_table *table, int write,
+static int ipv4_privileged_ports(const struct ctl_table *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = container_of(table->data, struct net,
@@ -130,7 +135,8 @@ static int ipv4_privileged_ports(struct ctl_table *table, int write,
 	return ret;
 }
 
-static void inet_get_ping_group_range_table(struct ctl_table *table, kgid_t *low, kgid_t *high)
+static void inet_get_ping_group_range_table(const struct ctl_table *table,
+					    kgid_t *low, kgid_t *high)
 {
 	kgid_t *data = table->data;
 	struct net *net =
@@ -145,7 +151,8 @@ static void inet_get_ping_group_range_table(struct ctl_table *table, kgid_t *low
 }
 
 /* Update system visible IP port range */
-static void set_ping_group_range(struct ctl_table *table, kgid_t low, kgid_t high)
+static void set_ping_group_range(const struct ctl_table *table,
+				 kgid_t low, kgid_t high)
 {
 	kgid_t *data = table->data;
 	struct net *net =
@@ -157,7 +164,7 @@ static void set_ping_group_range(struct ctl_table *table, kgid_t low, kgid_t hig
 }
 
 /* Validate changes from /proc interface. */
-static int ipv4_ping_group_range(struct ctl_table *table, int write,
+static int ipv4_ping_group_range(const struct ctl_table *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct user_namespace *user_ns = current_user_ns();
@@ -192,7 +199,7 @@ static int ipv4_ping_group_range(struct ctl_table *table, int write,
 	return ret;
 }
 
-static int ipv4_fwd_update_priority(struct ctl_table *table, int write,
+static int ipv4_fwd_update_priority(const struct ctl_table *table, int write,
 				    void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net;
@@ -208,7 +215,7 @@ static int ipv4_fwd_update_priority(struct ctl_table *table, int write,
 	return ret;
 }
 
-static int proc_tcp_congestion_control(struct ctl_table *ctl, int write,
+static int proc_tcp_congestion_control(const struct ctl_table *ctl, int write,
 				       void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = container_of(ctl->data, struct net,
@@ -228,7 +235,7 @@ static int proc_tcp_congestion_control(struct ctl_table *ctl, int write,
 	return ret;
 }
 
-static int proc_tcp_available_congestion_control(struct ctl_table *ctl,
+static int proc_tcp_available_congestion_control(const struct ctl_table *ctl,
 						 int write, void *buffer,
 						 size_t *lenp, loff_t *ppos)
 {
@@ -244,7 +251,7 @@ static int proc_tcp_available_congestion_control(struct ctl_table *ctl,
 	return ret;
 }
 
-static int proc_allowed_congestion_control(struct ctl_table *ctl,
+static int proc_allowed_congestion_control(const struct ctl_table *ctl,
 					   int write, void *buffer,
 					   size_t *lenp, loff_t *ppos)
 {
@@ -281,7 +288,7 @@ static int sscanf_key(char *buf, __le32 *key)
 	return ret;
 }
 
-static int proc_tcp_fastopen_key(struct ctl_table *table, int write,
+static int proc_tcp_fastopen_key(const struct ctl_table *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = container_of(table->data, struct net,
@@ -352,7 +359,7 @@ bad_key:
 	return ret;
 }
 
-static int proc_tfo_blackhole_detect_timeout(struct ctl_table *table,
+static int proc_tfo_blackhole_detect_timeout(const struct ctl_table *table,
 					     int write, void *buffer,
 					     size_t *lenp, loff_t *ppos)
 {
@@ -367,7 +374,7 @@ static int proc_tfo_blackhole_detect_timeout(struct ctl_table *table,
 	return ret;
 }
 
-static int proc_tcp_available_ulp(struct ctl_table *ctl,
+static int proc_tcp_available_ulp(const struct ctl_table *ctl,
 				  int write, void *buffer, size_t *lenp,
 				  loff_t *ppos)
 {
@@ -384,7 +391,7 @@ static int proc_tcp_available_ulp(struct ctl_table *ctl,
 	return ret;
 }
 
-static int proc_tcp_ehash_entries(struct ctl_table *table, int write,
+static int proc_tcp_ehash_entries(const struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = container_of(table->data, struct net,
@@ -408,7 +415,7 @@ static int proc_tcp_ehash_entries(struct ctl_table *table, int write,
 	return proc_dointvec(&tbl, write, buffer, lenp, ppos);
 }
 
-static int proc_udp_hash_entries(struct ctl_table *table, int write,
+static int proc_udp_hash_entries(const struct ctl_table *table, int write,
 				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = container_of(table->data, struct net,
@@ -432,7 +439,7 @@ static int proc_udp_hash_entries(struct ctl_table *table, int write,
 }
 
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
-static int proc_fib_multipath_hash_policy(struct ctl_table *table, int write,
+static int proc_fib_multipath_hash_policy(const struct ctl_table *table, int write,
 					  void *buffer, size_t *lenp,
 					  loff_t *ppos)
 {
@@ -447,7 +454,7 @@ static int proc_fib_multipath_hash_policy(struct ctl_table *table, int write,
 	return ret;
 }
 
-static int proc_fib_multipath_hash_fields(struct ctl_table *table, int write,
+static int proc_fib_multipath_hash_fields(const struct ctl_table *table, int write,
 					  void *buffer, size_t *lenp,
 					  loff_t *ppos)
 {
@@ -462,6 +469,61 @@ static int proc_fib_multipath_hash_fields(struct ctl_table *table, int write,
 
 	return ret;
 }
+
+static u32 proc_fib_multipath_hash_rand_seed __ro_after_init;
+
+static void proc_fib_multipath_hash_init_rand_seed(void)
+{
+	get_random_bytes(&proc_fib_multipath_hash_rand_seed,
+			 sizeof(proc_fib_multipath_hash_rand_seed));
+}
+
+static void proc_fib_multipath_hash_set_seed(struct net *net, u32 user_seed)
+{
+	struct sysctl_fib_multipath_hash_seed new = {
+		.user_seed = user_seed,
+		.mp_seed = (user_seed ? user_seed :
+			    proc_fib_multipath_hash_rand_seed),
+	};
+
+	WRITE_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed, new);
+}
+
+static int proc_fib_multipath_hash_seed(const struct ctl_table *table, int write,
+					void *buffer, size_t *lenp,
+					loff_t *ppos)
+{
+	struct sysctl_fib_multipath_hash_seed *mphs;
+	struct net *net = table->data;
+	struct ctl_table tmp;
+	u32 user_seed;
+	int ret;
+
+	mphs = &net->ipv4.sysctl_fib_multipath_hash_seed;
+	user_seed = mphs->user_seed;
+
+	tmp = *table;
+	tmp.data = &user_seed;
+
+	ret = proc_douintvec_minmax(&tmp, write, buffer, lenp, ppos);
+
+	if (write && ret == 0) {
+		proc_fib_multipath_hash_set_seed(net, user_seed);
+		call_netevent_notifiers(NETEVENT_IPV4_MPATH_HASH_UPDATE, net);
+	}
+
+	return ret;
+}
+#else
+
+static void proc_fib_multipath_hash_init_rand_seed(void)
+{
+}
+
+static void proc_fib_multipath_hash_set_seed(struct net *net, u32 user_seed)
+{
+}
+
 #endif
 
 static struct ctl_table ipv4_table[] = {
@@ -544,22 +606,6 @@ static struct ctl_table ipv4_table[] = {
 		.proc_handler   = proc_tcp_available_ulp,
 	},
 	{
-		.procname	= "icmp_msgs_per_sec",
-		.data		= &sysctl_icmp_msgs_per_sec,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-	},
-	{
-		.procname	= "icmp_msgs_burst",
-		.data		= &sysctl_icmp_msgs_burst,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-	},
-	{
 		.procname	= "udp_mem",
 		.data		= &sysctl_udp_mem,
 		.maxlen		= sizeof(sysctl_udp_mem),
@@ -631,6 +677,15 @@ static struct ctl_table ipv4_net_table[] = {
 		.extra2		= SYSCTL_ONE
 	},
 	{
+		.procname	= "icmp_errors_extension_mask",
+		.data		= &init_net.ipv4.sysctl_icmp_errors_extension_mask,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= proc_dou8vec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &icmp_errors_extension_mask_all,
+	},
+	{
 		.procname	= "icmp_ratelimit",
 		.data		= &init_net.ipv4.sysctl_icmp_ratelimit,
 		.maxlen		= sizeof(int),
@@ -643,6 +698,22 @@ static struct ctl_table ipv4_net_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "icmp_msgs_per_sec",
+		.data		= &init_net.ipv4.sysctl_icmp_msgs_per_sec,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+	},
+	{
+		.procname	= "icmp_msgs_burst",
+		.data		= &init_net.ipv4.sysctl_icmp_msgs_burst,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "ping_group_range",
@@ -669,7 +740,25 @@ static struct ctl_table ipv4_net_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dou8vec_minmax,
 		.extra1		= SYSCTL_ZERO,
+		.extra2		= &tcp_ecn_mode_max,
+	},
+	{
+		.procname	= "tcp_ecn_option",
+		.data		= &init_net.ipv4.sysctl_tcp_ecn_option,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= proc_dou8vec_minmax,
+		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO,
+	},
+	{
+		.procname	= "tcp_ecn_option_beacon",
+		.data		= &init_net.ipv4.sysctl_tcp_ecn_option_beacon,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= proc_dou8vec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_THREE,
 	},
 	{
 		.procname	= "tcp_ecn_fallback",
@@ -1009,6 +1098,15 @@ static struct ctl_table ipv4_net_table[] = {
 		.extra2		= SYSCTL_TWO,
 	},
 	{
+		.procname	= "tcp_tw_reuse_delay",
+		.data		= &init_net.ipv4.sysctl_tcp_tw_reuse_delay,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_douintvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= &tcp_tw_reuse_delay_max,
+	},
+	{
 		.procname	= "tcp_max_syn_backlog",
 		.data		= &init_net.ipv4.sysctl_max_syn_backlog,
 		.maxlen		= sizeof(int),
@@ -1069,6 +1167,13 @@ static struct ctl_table ipv4_net_table[] = {
 		.proc_handler	= proc_fib_multipath_hash_fields,
 		.extra1		= SYSCTL_ONE,
 		.extra2		= &fib_multipath_hash_fields_all_mask,
+	},
+	{
+		.procname	= "fib_multipath_hash_seed",
+		.data		= &init_net,
+		.maxlen		= sizeof(u32),
+		.mode		= 0644,
+		.proc_handler	= proc_fib_multipath_hash_seed,
 	},
 #endif
 	{
@@ -1238,6 +1343,15 @@ static struct ctl_table ipv4_net_table[] = {
 		.proc_handler	= proc_dou8vec_minmax,
 	},
 	{
+		.procname	= "tcp_rcvbuf_low_rtt",
+		.data		= &init_net.ipv4.sysctl_tcp_rcvbuf_low_rtt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
+	{
 		.procname	= "tcp_tso_win_divisor",
 		.data		= &init_net.ipv4.sysctl_tcp_tso_win_divisor,
 		.maxlen		= sizeof(u8),
@@ -1345,6 +1459,15 @@ static struct ctl_table ipv4_net_table[] = {
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "tcp_comp_sack_rtt_percent",
+		.data		= &init_net.ipv4.sysctl_tcp_comp_sack_rtt_percent,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= SYSCTL_ONE_THOUSAND,
 	},
 	{
 		.procname	= "tcp_comp_sack_slack_ns",
@@ -1501,6 +1624,23 @@ static struct ctl_table ipv4_net_table[] = {
 		.proc_handler	= proc_dou8vec_minmax,
 		.extra1		= SYSCTL_ONE,
 	},
+	{
+		.procname	= "tcp_rto_min_us",
+		.data		= &init_net.ipv4.sysctl_tcp_rto_min_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "tcp_rto_max_ms",
+		.data		= &init_net.ipv4.sysctl_tcp_rto_max_ms,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE_THOUSAND,
+		.extra2		= &tcp_rto_max_max,
+	},
 };
 
 static __net_init int ipv4_sysctl_init_net(struct net *net)
@@ -1540,6 +1680,8 @@ static __net_init int ipv4_sysctl_init_net(struct net *net)
 	if (!net->ipv4.sysctl_local_reserved_ports)
 		goto err_ports;
 
+	proc_fib_multipath_hash_set_seed(net, 0);
+
 	return 0;
 
 err_ports:
@@ -1573,6 +1715,8 @@ static __init int sysctl_ipv4_init(void)
 	hdr = register_net_sysctl(&init_net, "net/ipv4", ipv4_table);
 	if (!hdr)
 		return -ENOMEM;
+
+	proc_fib_multipath_hash_init_rand_seed();
 
 	if (register_pernet_subsys(&ipv4_sysctl_ops)) {
 		unregister_net_sysctl_table(hdr);

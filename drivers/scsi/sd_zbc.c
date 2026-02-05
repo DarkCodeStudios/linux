@@ -13,7 +13,7 @@
 #include <linux/sched/mm.h>
 #include <linux/mutex.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -35,8 +35,7 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * @buf: SCSI zone descriptor.
  * @idx: Index of the zone relative to the first zone reported by the current
  *	sd_zbc_report_zones() call.
- * @cb: Callback function pointer.
- * @data: Second argument passed to @cb.
+ * @args: report zones arguments (callback, etc)
  *
  * Return: Value returned by @cb.
  *
@@ -44,12 +43,11 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * call @cb(blk_zone, @data).
  */
 static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
-			       unsigned int idx, report_zones_cb cb, void *data)
+			unsigned int idx, struct blk_report_zones_args *args)
 {
 	struct scsi_device *sdp = sdkp->device;
 	struct blk_zone zone = { 0 };
 	sector_t start_lba, gran;
-	int ret;
 
 	if (WARN_ON_ONCE(sd_zbc_is_gap_zone(buf)))
 		return -EINVAL;
@@ -87,11 +85,7 @@ static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
 	else
 		zone.wp = logical_to_sectors(sdp, get_unaligned_be64(&buf[24]));
 
-	ret = cb(&zone, idx, data);
-	if (ret)
-		return ret;
-
-	return 0;
+	return disk_report_zone(sdkp->disk, &zone, idx, args);
 }
 
 /**
@@ -169,6 +163,7 @@ static void *sd_zbc_alloc_report_buffer(struct scsi_disk *sdkp,
 					unsigned int nr_zones, size_t *buflen)
 {
 	struct request_queue *q = sdkp->disk->queue;
+	unsigned int max_segments;
 	size_t bufsize;
 	void *buf;
 
@@ -180,16 +175,18 @@ static void *sd_zbc_alloc_report_buffer(struct scsi_disk *sdkp,
 	 * Furthermore, since the report zone command cannot be split, make
 	 * sure that the allocated buffer can always be mapped by limiting the
 	 * number of pages allocated to the HBA max segments limit.
+	 * Since max segments can be larger than the max inline bio vectors,
+	 * further limit the allocated buffer to BIO_MAX_INLINE_VECS.
 	 */
 	nr_zones = min(nr_zones, sdkp->zone_info.nr_zones);
 	bufsize = roundup((nr_zones + 1) * 64, SECTOR_SIZE);
 	bufsize = min_t(size_t, bufsize,
 			queue_max_hw_sectors(q) << SECTOR_SHIFT);
-	bufsize = min_t(size_t, bufsize, queue_max_segments(q) << PAGE_SHIFT);
+	max_segments = min(BIO_MAX_INLINE_VECS, queue_max_segments(q));
+	bufsize = min_t(size_t, bufsize, max_segments << PAGE_SHIFT);
 
 	while (bufsize >= SECTOR_SIZE) {
-		buf = __vmalloc(bufsize,
-				GFP_KERNEL | __GFP_ZERO | __GFP_NORETRY);
+		buf = kvzalloc(bufsize, GFP_KERNEL | __GFP_NORETRY);
 		if (buf) {
 			*buflen = bufsize;
 			return buf;
@@ -214,14 +211,14 @@ static inline sector_t sd_zbc_zone_sectors(struct scsi_disk *sdkp)
  * @disk: Disk to report zones for.
  * @sector: Start sector.
  * @nr_zones: Maximum number of zones to report.
- * @cb: Callback function called to report zone information.
- * @data: Second argument passed to @cb.
+ * @args: Callback arguments.
  *
  * Called by the block layer to iterate over zone information. See also the
  * disk->fops->report_zones() calls in block/blk-zoned.c.
  */
 int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
-			unsigned int nr_zones, report_zones_cb cb, void *data)
+			unsigned int nr_zones,
+			struct blk_report_zones_args *args)
 {
 	struct scsi_disk *sdkp = scsi_disk(disk);
 	sector_t lba = sectors_to_logical(sdkp->device, sector);
@@ -232,7 +229,7 @@ int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
 	int zone_idx = 0;
 	int ret;
 
-	if (!sd_is_zoned(sdkp))
+	if (sdkp->device->type != TYPE_ZBC)
 		/* Not a zoned device */
 		return -EOPNOTSUPP;
 
@@ -280,7 +277,7 @@ int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
 			}
 
 			ret = sd_zbc_parse_report(sdkp, buf + offset, zone_idx,
-						  cb, data);
+						  args);
 			if (ret)
 				goto out;
 
@@ -300,7 +297,7 @@ static blk_status_t sd_zbc_cmnd_checks(struct scsi_cmnd *cmd)
 	struct scsi_disk *sdkp = scsi_disk(rq->q->disk);
 	sector_t sector = blk_rq_pos(rq);
 
-	if (!sd_is_zoned(sdkp))
+	if (sdkp->device->type != TYPE_ZBC)
 		/* Not a zoned device */
 		return BLK_STS_IOERR;
 
@@ -521,7 +518,7 @@ static int sd_zbc_check_capacity(struct scsi_disk *sdkp, unsigned char *buf,
 
 static void sd_zbc_print_zones(struct scsi_disk *sdkp)
 {
-	if (!sd_is_zoned(sdkp) || !sdkp->capacity)
+	if (sdkp->device->type != TYPE_ZBC || !sdkp->capacity)
 		return;
 
 	if (sdkp->capacity & (sdkp->zone_info.zone_blocks - 1))
@@ -565,12 +562,6 @@ int sd_zbc_revalidate_zones(struct scsi_disk *sdkp)
 	sdkp->zone_info.zone_blocks = zone_blocks;
 	sdkp->zone_info.nr_zones = nr_zones;
 
-	blk_queue_chunk_sectors(q,
-			logical_to_sectors(sdkp->device, zone_blocks));
-
-	/* Enable block layer zone append emulation */
-	blk_queue_max_zone_append_sectors(q, 0);
-
 	flags = memalloc_noio_save();
 	ret = blk_revalidate_disk_zones(disk);
 	memalloc_noio_restore(flags);
@@ -588,27 +579,31 @@ int sd_zbc_revalidate_zones(struct scsi_disk *sdkp)
 /**
  * sd_zbc_read_zones - Read zone information and update the request queue
  * @sdkp: SCSI disk pointer.
+ * @lim: queue limits to read into
  * @buf: 512 byte buffer used for storing SCSI command output.
  *
  * Read zone information and update the request queue zone characteristics and
  * also the zoned device information in *sdkp. Called by sd_revalidate_disk()
  * before the gendisk capacity has been set.
  */
-int sd_zbc_read_zones(struct scsi_disk *sdkp, u8 buf[SD_BUF_SIZE])
+int sd_zbc_read_zones(struct scsi_disk *sdkp, struct queue_limits *lim,
+		u8 buf[SD_BUF_SIZE])
 {
-	struct gendisk *disk = sdkp->disk;
-	struct request_queue *q = disk->queue;
 	unsigned int nr_zones;
 	u32 zone_blocks = 0;
 	int ret;
 
-	if (!sd_is_zoned(sdkp)) {
-		/*
-		 * Device managed or normal SCSI disk, no special handling
-		 * required.
-		 */
+	if (sdkp->device->type != TYPE_ZBC)
 		return 0;
-	}
+
+	lim->features |= BLK_FEAT_ZONED;
+
+	/*
+	 * Per ZBC and ZAC specifications, writes in sequential write required
+	 * zones of host-managed devices must be aligned to the device physical
+	 * block size.
+	 */
+	lim->zone_write_granularity = sdkp->physical_block_size;
 
 	/* READ16/WRITE16/SYNC16 is mandatory for ZBC devices */
 	sdkp->device->use_16_for_rw = 1;
@@ -625,17 +620,17 @@ int sd_zbc_read_zones(struct scsi_disk *sdkp, u8 buf[SD_BUF_SIZE])
 	if (ret != 0)
 		goto err;
 
-	/* The drive satisfies the kernel restrictions: set it up */
-	blk_queue_flag_set(QUEUE_FLAG_ZONE_RESETALL, q);
-	if (sdkp->zones_max_open == U32_MAX)
-		disk_set_max_open_zones(disk, 0);
-	else
-		disk_set_max_open_zones(disk, sdkp->zones_max_open);
-	disk_set_max_active_zones(disk, 0);
 	nr_zones = round_up(sdkp->capacity, zone_blocks) >> ilog2(zone_blocks);
-
 	sdkp->early_zone_info.nr_zones = nr_zones;
 	sdkp->early_zone_info.zone_blocks = zone_blocks;
+
+	/* The drive satisfies the kernel restrictions: set it up */
+	if (sdkp->zones_max_open == U32_MAX)
+		lim->max_open_zones = 0;
+	else
+		lim->max_open_zones = sdkp->zones_max_open;
+	lim->max_active_zones = 0;
+	lim->chunk_sectors = logical_to_sectors(sdkp->device, zone_blocks);
 
 	return 0;
 

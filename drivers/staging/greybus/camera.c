@@ -1128,18 +1128,7 @@ done:
 
 static int gb_camera_debugfs_open(struct inode *inode, struct file *file)
 {
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(gb_camera_debugfs_entries); ++i) {
-		const struct gb_camera_debugfs_entry *entry =
-			&gb_camera_debugfs_entries[i];
-
-		if (!strcmp(file->f_path.dentry->d_iname, entry->name)) {
-			file->private_data = (void *)entry;
-			break;
-		}
-	}
-
+	file->private_data = debugfs_get_aux(file);
 	return 0;
 }
 
@@ -1175,9 +1164,9 @@ static int gb_camera_debugfs_init(struct gb_camera *gcam)
 
 		gcam->debugfs.buffers[i].length = 0;
 
-		debugfs_create_file(entry->name, entry->mask,
-				    gcam->debugfs.root, gcam,
-				    &gb_camera_debugfs_ops);
+		debugfs_create_file_aux(entry->name, entry->mask,
+					gcam->debugfs.root, gcam, entry,
+					&gb_camera_debugfs_ops);
 	}
 
 	return 0;
@@ -1374,4 +1363,5 @@ static struct greybus_driver gb_camera_driver = {
 
 module_greybus_driver(gb_camera_driver);
 
+MODULE_DESCRIPTION("Greybus Camera protocol driver.");
 MODULE_LICENSE("GPL v2");

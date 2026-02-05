@@ -8,6 +8,7 @@
 #include "lkdtm.h"
 #include <linux/cpu.h>
 #include <linux/list.h>
+#include <linux/hrtimer.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task_stack.h>
@@ -100,9 +101,59 @@ static void lkdtm_PANIC_STOP_IRQOFF(void)
 	stop_machine(panic_stop_irqoff_fn, &v, cpu_online_mask);
 }
 
+static bool wait_for_panic;
+
+static enum hrtimer_restart panic_in_hardirq(struct hrtimer *timer)
+{
+	panic("from hard IRQ context");
+
+	wait_for_panic = false;
+	return HRTIMER_NORESTART;
+}
+
+static void lkdtm_PANIC_IN_HARDIRQ(void)
+{
+	struct hrtimer timer;
+
+	wait_for_panic = true;
+	hrtimer_setup_on_stack(&timer, panic_in_hardirq,
+			       CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
+	hrtimer_start(&timer, us_to_ktime(100), HRTIMER_MODE_REL_HARD);
+
+	while (READ_ONCE(wait_for_panic))
+		cpu_relax();
+
+	hrtimer_cancel(&timer);
+}
+
 static void lkdtm_BUG(void)
 {
 	BUG();
+}
+
+static bool wait_for_bug;
+
+static enum hrtimer_restart bug_in_hardirq(struct hrtimer *timer)
+{
+	BUG();
+
+	wait_for_bug = false;
+	return HRTIMER_NORESTART;
+}
+
+static void lkdtm_BUG_IN_HARDIRQ(void)
+{
+	struct hrtimer timer;
+
+	wait_for_bug = true;
+	hrtimer_setup_on_stack(&timer, bug_in_hardirq,
+			       CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
+	hrtimer_start(&timer, us_to_ktime(100), HRTIMER_MODE_REL_HARD);
+
+	while (READ_ONCE(wait_for_bug))
+		cpu_relax();
+
+	hrtimer_cancel(&timer);
 }
 
 static int warn_counter;
@@ -286,6 +337,35 @@ static void lkdtm_HARDLOCKUP(void)
 		cpu_relax();
 }
 
+static void __lkdtm_SMP_CALL_LOCKUP(void *unused)
+{
+	for (;;)
+		cpu_relax();
+}
+
+static void lkdtm_SMP_CALL_LOCKUP(void)
+{
+	unsigned int cpu, target;
+
+	cpus_read_lock();
+
+	cpu = get_cpu();
+	target = cpumask_any_but(cpu_online_mask, cpu);
+
+	if (target >= nr_cpu_ids) {
+		pr_err("FAIL: no other online CPUs\n");
+		goto out_put_cpus;
+	}
+
+	smp_call_function_single(target, __lkdtm_SMP_CALL_LOCKUP, NULL, 1);
+
+	pr_err("FAIL: did not hang\n");
+
+out_put_cpus:
+	put_cpu();
+	cpus_read_unlock();
+}
+
 static void lkdtm_SPINLOCKUP(void)
 {
 	/* Must be called twice to trigger. */
@@ -416,7 +496,7 @@ static void lkdtm_FAM_BOUNDS(void)
 
 	pr_err("FAIL: survived access of invalid flexible array member index!\n");
 
-	if (!__has_attribute(__counted_by__))
+	if (!IS_ENABLED(CONFIG_CC_HAS_COUNTED_BY))
 		pr_warn("This is expected since this %s was built with a compiler that does not support __counted_by\n",
 			lkdtm_kernel_info);
 	else if (IS_ENABLED(CONFIG_UBSAN_BOUNDS))
@@ -667,7 +747,9 @@ static noinline void lkdtm_CORRUPT_PAC(void)
 static struct crashtype crashtypes[] = {
 	CRASHTYPE(PANIC),
 	CRASHTYPE(PANIC_STOP_IRQOFF),
+	CRASHTYPE(PANIC_IN_HARDIRQ),
 	CRASHTYPE(BUG),
+	CRASHTYPE(BUG_IN_HARDIRQ),
 	CRASHTYPE(WARNING),
 	CRASHTYPE(WARNING_MESSAGE),
 	CRASHTYPE(EXCEPTION),
@@ -680,6 +762,7 @@ static struct crashtype crashtypes[] = {
 	CRASHTYPE(UNALIGNED_LOAD_STORE_WRITE),
 	CRASHTYPE(SOFTLOCKUP),
 	CRASHTYPE(HARDLOCKUP),
+	CRASHTYPE(SMP_CALL_LOCKUP),
 	CRASHTYPE(SPINLOCKUP),
 	CRASHTYPE(HUNG_TASK),
 	CRASHTYPE(OVERFLOW_SIGNED),

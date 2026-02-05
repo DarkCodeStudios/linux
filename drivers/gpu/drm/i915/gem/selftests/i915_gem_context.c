@@ -369,7 +369,7 @@ static int live_parallel_switch(void *arg)
 		if (!data[n].ce[0])
 			continue;
 
-		worker = kthread_create_worker(0, "igt/parallel:%s",
+		worker = kthread_run_worker(0, "igt/parallel:%s",
 					       data[n].ce[0]->engine->name);
 		if (IS_ERR(worker)) {
 			err = PTR_ERR(worker);
@@ -962,13 +962,14 @@ emit_rpcs_query(struct drm_i915_gem_object *obj,
 	if (IS_ERR(rpcs))
 		return PTR_ERR(rpcs);
 
+	i915_gem_ww_ctx_init(&ww, false);
+
 	batch = i915_vma_instance(rpcs, ce->vm, NULL);
 	if (IS_ERR(batch)) {
 		err = PTR_ERR(batch);
 		goto err_put;
 	}
 
-	i915_gem_ww_ctx_init(&ww, false);
 retry:
 	err = i915_gem_object_lock(obj, &ww);
 	if (!err)

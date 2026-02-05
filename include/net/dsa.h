@@ -53,11 +53,16 @@ struct tc_action;
 #define DSA_TAG_PROTO_RTL8_4T_VALUE		25
 #define DSA_TAG_PROTO_RZN1_A5PSW_VALUE		26
 #define DSA_TAG_PROTO_LAN937X_VALUE		27
+#define DSA_TAG_PROTO_VSC73XX_8021Q_VALUE	28
+#define DSA_TAG_PROTO_BRCM_LEGACY_FCS_VALUE	29
+#define DSA_TAG_PROTO_YT921X_VALUE		30
+#define DSA_TAG_PROTO_MXL_GSW1XX_VALUE		31
 
 enum dsa_tag_protocol {
 	DSA_TAG_PROTO_NONE		= DSA_TAG_PROTO_NONE_VALUE,
 	DSA_TAG_PROTO_BRCM		= DSA_TAG_PROTO_BRCM_VALUE,
 	DSA_TAG_PROTO_BRCM_LEGACY	= DSA_TAG_PROTO_BRCM_LEGACY_VALUE,
+	DSA_TAG_PROTO_BRCM_LEGACY_FCS	= DSA_TAG_PROTO_BRCM_LEGACY_FCS_VALUE,
 	DSA_TAG_PROTO_BRCM_PREPEND	= DSA_TAG_PROTO_BRCM_PREPEND_VALUE,
 	DSA_TAG_PROTO_DSA		= DSA_TAG_PROTO_DSA_VALUE,
 	DSA_TAG_PROTO_EDSA		= DSA_TAG_PROTO_EDSA_VALUE,
@@ -83,6 +88,9 @@ enum dsa_tag_protocol {
 	DSA_TAG_PROTO_RTL8_4T		= DSA_TAG_PROTO_RTL8_4T_VALUE,
 	DSA_TAG_PROTO_RZN1_A5PSW	= DSA_TAG_PROTO_RZN1_A5PSW_VALUE,
 	DSA_TAG_PROTO_LAN937X		= DSA_TAG_PROTO_LAN937X_VALUE,
+	DSA_TAG_PROTO_VSC73XX_8021Q	= DSA_TAG_PROTO_VSC73XX_8021Q_VALUE,
+	DSA_TAG_PROTO_YT921X		= DSA_TAG_PROTO_YT921X_VALUE,
+	DSA_TAG_PROTO_MXL_GSW1XX	= DSA_TAG_PROTO_MXL_GSW1XX_VALUE,
 };
 
 struct dsa_switch;
@@ -294,6 +302,7 @@ struct dsa_port {
 	struct devlink_port	devlink_port;
 	struct phylink		*pl;
 	struct phylink_config	pl_config;
+	netdevice_tracker	conduit_tracker;
 	struct dsa_lag		*lag;
 	struct net_device	*hsr_dev;
 
@@ -401,14 +410,18 @@ struct dsa_switch {
 	 */
 	u32			configure_vlan_while_not_filtering:1;
 
-	/* If the switch driver always programs the CPU port as egress tagged
-	 * despite the VLAN configuration indicating otherwise, then setting
-	 * @untag_bridge_pvid will force the DSA receive path to pop the
-	 * bridge's default_pvid VLAN tagged frames to offer a consistent
-	 * behavior between a vlan_filtering=0 and vlan_filtering=1 bridge
-	 * device.
+	/* Pop the default_pvid of VLAN-unaware bridge ports from tagged frames.
+	 * DEPRECATED: Do NOT set this field in new drivers. Instead look at
+	 * the dsa_software_vlan_untag() comments.
 	 */
 	u32			untag_bridge_pvid:1;
+	/* Pop the default_pvid of VLAN-aware bridge ports from tagged frames.
+	 * Useful if the switch cannot preserve the VLAN tag as seen on the
+	 * wire for user port ingress, and chooses to send all frames as
+	 * VLAN-tagged to the CPU, including those which were originally
+	 * untagged.
+	 */
+	u32			untag_vlan_aware_bridge_pvid:1;
 
 	/* Let DSA manage the FDB entries towards the
 	 * CPU, based on the software bridge database.
@@ -879,27 +892,6 @@ struct dsa_switch_ops {
 	 */
 	void	(*phylink_get_caps)(struct dsa_switch *ds, int port,
 				    struct phylink_config *config);
-	struct phylink_pcs *(*phylink_mac_select_pcs)(struct dsa_switch *ds,
-						      int port,
-						      phy_interface_t iface);
-	int	(*phylink_mac_prepare)(struct dsa_switch *ds, int port,
-				       unsigned int mode,
-				       phy_interface_t interface);
-	void	(*phylink_mac_config)(struct dsa_switch *ds, int port,
-				      unsigned int mode,
-				      const struct phylink_link_state *state);
-	int	(*phylink_mac_finish)(struct dsa_switch *ds, int port,
-				      unsigned int mode,
-				      phy_interface_t interface);
-	void	(*phylink_mac_link_down)(struct dsa_switch *ds, int port,
-					 unsigned int mode,
-					 phy_interface_t interface);
-	void	(*phylink_mac_link_up)(struct dsa_switch *ds, int port,
-				       unsigned int mode,
-				       phy_interface_t interface,
-				       struct phy_device *phydev,
-				       int speed, int duplex,
-				       bool tx_pause, bool rx_pause);
 	void	(*phylink_fixed_state)(struct dsa_switch *ds, int port,
 				       struct phylink_link_state *state);
 	/*
@@ -921,6 +913,8 @@ struct dsa_switch_ops {
 	void	(*get_rmon_stats)(struct dsa_switch *ds, int port,
 				  struct ethtool_rmon_stats *rmon_stats,
 				  const struct ethtool_rmon_hist_range **ranges);
+	void	(*get_ts_stats)(struct dsa_switch *ds, int port,
+				struct ethtool_ts_stats *ts_stats);
 	void	(*get_stats64)(struct dsa_switch *ds, int port,
 				   struct rtnl_link_stats64 *s);
 	void	(*get_pause_stats)(struct dsa_switch *ds, int port,
@@ -940,7 +934,7 @@ struct dsa_switch_ops {
 	 * ethtool timestamp info
 	 */
 	int	(*get_ts_info)(struct dsa_switch *ds, int port,
-			       struct ethtool_ts_info *ts);
+			       struct kernel_ethtool_ts_info *ts);
 
 	/*
 	 * ethtool MAC merge layer
@@ -1003,9 +997,8 @@ struct dsa_switch_ops {
 	/*
 	 * Port's MAC EEE settings
 	 */
+	bool	(*support_eee)(struct dsa_switch *ds, int port);
 	int	(*set_mac_eee)(struct dsa_switch *ds, int port,
-			       struct ethtool_keee *e);
-	int	(*get_mac_eee)(struct dsa_switch *ds, int port,
 			       struct ethtool_keee *e);
 
 	/* EEPROM access */
@@ -1145,9 +1138,10 @@ struct dsa_switch_ops {
 	 * PTP functionality
 	 */
 	int	(*port_hwtstamp_get)(struct dsa_switch *ds, int port,
-				     struct ifreq *ifr);
+				     struct kernel_hwtstamp_config *config);
 	int	(*port_hwtstamp_set)(struct dsa_switch *ds, int port,
-				     struct ifreq *ifr);
+				     struct kernel_hwtstamp_config *config,
+				     struct netlink_ext_ack *extack);
 	void	(*port_txtstamp)(struct dsa_switch *ds, int port,
 				 struct sk_buff *skb);
 	bool	(*port_rxtstamp)(struct dsa_switch *ds, int port,
@@ -1258,7 +1252,8 @@ struct dsa_switch_ops {
 			     dsa_devlink_param_get, dsa_devlink_param_set, NULL)
 
 int dsa_devlink_param_get(struct devlink *dl, u32 id,
-			  struct devlink_param_gset_ctx *ctx);
+			  struct devlink_param_gset_ctx *ctx,
+			  struct netlink_ext_ack *extack);
 int dsa_devlink_param_set(struct devlink *dl, u32 id,
 			  struct devlink_param_gset_ctx *ctx,
 			  struct netlink_ext_ack *extack);
@@ -1321,17 +1316,21 @@ static inline int dsa_devlink_port_to_port(struct devlink_port *port)
 	return port->index;
 }
 
-struct dsa_switch_driver {
-	struct list_head	list;
-	const struct dsa_switch_ops *ops;
-};
-
 bool dsa_fdb_present_in_other_db(struct dsa_switch *ds, int port,
 				 const unsigned char *addr, u16 vid,
 				 struct dsa_db db);
 bool dsa_mdb_present_in_other_db(struct dsa_switch *ds, int port,
 				 const struct switchdev_obj_port_mdb *mdb,
 				 struct dsa_db db);
+
+int dsa_port_simple_hsr_validate(struct dsa_switch *ds, int port,
+				 struct net_device *hsr,
+				 struct netlink_ext_ack *extack);
+int dsa_port_simple_hsr_join(struct dsa_switch *ds, int port,
+			     struct net_device *hsr,
+			     struct netlink_ext_ack *extack);
+int dsa_port_simple_hsr_leave(struct dsa_switch *ds, int port,
+			      struct net_device *hsr);
 
 /* Keep inline for faster access in hot path */
 static inline bool netdev_uses_dsa(const struct net_device *dev)
@@ -1398,5 +1397,6 @@ static inline bool dsa_user_dev_check(const struct net_device *dev)
 
 netdev_tx_t dsa_enqueue_skb(struct sk_buff *skb, struct net_device *dev);
 void dsa_port_phylink_mac_change(struct dsa_switch *ds, int port, bool up);
+bool dsa_supports_eee(struct dsa_switch *ds, int port);
 
 #endif

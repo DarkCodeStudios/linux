@@ -64,6 +64,7 @@ static bool actions_may_change_flow(const struct nlattr *actions)
 		case OVS_ACTION_ATTR_TRUNC:
 		case OVS_ACTION_ATTR_USERSPACE:
 		case OVS_ACTION_ATTR_DROP:
+		case OVS_ACTION_ATTR_PSAMPLE:
 			break;
 
 		case OVS_ACTION_ATTR_CT:
@@ -1304,6 +1305,11 @@ static int metadata_from_nlattrs(struct net *net, struct sw_flow_match *match,
 	return 0;
 }
 
+/*
+ * Constructs NSH header 'nh' from attributes of OVS_ACTION_ATTR_PUSH_NSH,
+ * where 'nh' points to a memory block of 'size' bytes.  It's assumed that
+ * attributes were previously validated with validate_push_nsh().
+ */
 int nsh_hdr_from_nlattr(const struct nlattr *attr,
 			struct nshhdr *nh, size_t size)
 {
@@ -1313,8 +1319,6 @@ int nsh_hdr_from_nlattr(const struct nlattr *attr,
 	u8 ttl = 0;
 	int mdlen = 0;
 
-	/* validate_nsh has check this, so we needn't do duplicate check here
-	 */
 	if (size < NSH_BASE_HDR_LEN)
 		return -ENOBUFS;
 
@@ -1354,46 +1358,6 @@ int nsh_hdr_from_nlattr(const struct nlattr *attr,
 	/* nsh header length  = NSH_BASE_HDR_LEN + mdlen */
 	nh->ver_flags_ttl_len = 0;
 	nsh_set_flags_ttl_len(nh, flags, ttl, NSH_BASE_HDR_LEN + mdlen);
-
-	return 0;
-}
-
-int nsh_key_from_nlattr(const struct nlattr *attr,
-			struct ovs_key_nsh *nsh, struct ovs_key_nsh *nsh_mask)
-{
-	struct nlattr *a;
-	int rem;
-
-	/* validate_nsh has check this, so we needn't do duplicate check here
-	 */
-	nla_for_each_nested(a, attr, rem) {
-		int type = nla_type(a);
-
-		switch (type) {
-		case OVS_NSH_KEY_ATTR_BASE: {
-			const struct ovs_nsh_key_base *base = nla_data(a);
-			const struct ovs_nsh_key_base *base_mask = base + 1;
-
-			nsh->base = *base;
-			nsh_mask->base = *base_mask;
-			break;
-		}
-		case OVS_NSH_KEY_ATTR_MD1: {
-			const struct ovs_nsh_key_md1 *md1 = nla_data(a);
-			const struct ovs_nsh_key_md1 *md1_mask = md1 + 1;
-
-			memcpy(nsh->context, md1->context, sizeof(*md1));
-			memcpy(nsh_mask->context, md1_mask->context,
-			       sizeof(*md1_mask));
-			break;
-		}
-		case OVS_NSH_KEY_ATTR_MD2:
-			/* Not supported yet */
-			return -ENOTSUPP;
-		default:
-			return -EINVAL;
-		}
-	}
 
 	return 0;
 }
@@ -1937,7 +1901,7 @@ int ovs_nla_get_identifier(struct sw_flow_id *sfid, const struct nlattr *ufid,
 
 u32 ovs_nla_get_ufid_flags(const struct nlattr *attr)
 {
-	return attr ? nla_get_u32(attr) : 0;
+	return nla_get_u32_default(attr, 0);
 }
 
 /**
@@ -2316,13 +2280,9 @@ int ovs_nla_put_mask(const struct sw_flow *flow, struct sk_buff *skb)
 				OVS_FLOW_ATTR_MASK, true, skb);
 }
 
-#define MAX_ACTIONS_BUFSIZE	(32 * 1024)
-
 static struct sw_flow_actions *nla_alloc_flow_actions(int size)
 {
 	struct sw_flow_actions *sfa;
-
-	WARN_ON_ONCE(size > MAX_ACTIONS_BUFSIZE);
 
 	sfa = kmalloc(kmalloc_size_roundup(sizeof(*sfa) + size), GFP_KERNEL);
 	if (!sfa)
@@ -2409,7 +2369,7 @@ static void ovs_nla_free_nested_actions(const struct nlattr *actions, int len)
 	/* Whenever new actions are added, the need to update this
 	 * function should be considered.
 	 */
-	BUILD_BUG_ON(OVS_ACTION_ATTR_MAX != 24);
+	BUILD_BUG_ON(OVS_ACTION_ATTR_MAX != 25);
 
 	if (!actions)
 		return;
@@ -2479,18 +2439,9 @@ static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa,
 
 	new_acts_size = max(next_offset + req_size, ksize(*sfa) * 2);
 
-	if (new_acts_size > MAX_ACTIONS_BUFSIZE) {
-		if ((next_offset + req_size) > MAX_ACTIONS_BUFSIZE) {
-			OVS_NLERR(log, "Flow action size exceeds max %u",
-				  MAX_ACTIONS_BUFSIZE);
-			return ERR_PTR(-EMSGSIZE);
-		}
-		new_acts_size = MAX_ACTIONS_BUFSIZE;
-	}
-
 	acts = nla_alloc_flow_actions(new_acts_size);
 	if (IS_ERR(acts))
-		return (void *)acts;
+		return ERR_CAST(acts);
 
 	memcpy(acts->actions, (*sfa)->actions, (*sfa)->actions_len);
 	acts->actions_len = (*sfa)->actions_len;
@@ -2851,17 +2802,20 @@ static int validate_and_copy_set_tun(const struct nlattr *attr,
 	return err;
 }
 
-static bool validate_nsh(const struct nlattr *attr, bool is_mask,
-			 bool is_push_nsh, bool log)
+static bool validate_push_nsh(const struct nlattr *a, bool log)
 {
+	struct nlattr *nsh_key = nla_data(a);
 	struct sw_flow_match match;
 	struct sw_flow_key key;
-	int ret = 0;
+
+	/* There must be one and only one NSH header. */
+	if (!nla_ok(nsh_key, nla_len(a)) ||
+	    nla_total_size(nla_len(nsh_key)) != nla_len(a) ||
+	    nla_type(nsh_key) != OVS_KEY_ATTR_NSH)
+		return false;
 
 	ovs_match_init(&match, &key, true, NULL);
-	ret = nsh_key_put_from_nlattr(attr, &match, is_mask,
-				      is_push_nsh, log);
-	return !ret;
+	return !nsh_key_put_from_nlattr(nsh_key, &match, false, true, log);
 }
 
 /* Return false if there are any non-masked bits set.
@@ -2888,7 +2842,8 @@ static int validate_set(const struct nlattr *a,
 	size_t key_len;
 
 	/* There can be only one key in a action */
-	if (nla_total_size(nla_len(ovs_key)) != nla_len(a))
+	if (!nla_ok(ovs_key, nla_len(a)) ||
+	    nla_total_size(nla_len(ovs_key)) != nla_len(a))
 		return -EINVAL;
 
 	key_len = nla_len(ovs_key);
@@ -3008,13 +2963,6 @@ static int validate_set(const struct nlattr *a,
 
 		break;
 
-	case OVS_KEY_ATTR_NSH:
-		if (eth_type != htons(ETH_P_NSH))
-			return -EINVAL;
-		if (!validate_nsh(nla_data(a), masked, false, log))
-			return -EINVAL;
-		break;
-
 	default:
 		return -EINVAL;
 	}
@@ -3060,7 +3008,8 @@ static int validate_userspace(const struct nlattr *attr)
 	struct nlattr *a[OVS_USERSPACE_ATTR_MAX + 1];
 	int error;
 
-	error = nla_parse_nested_deprecated(a, OVS_USERSPACE_ATTR_MAX, attr,
+	error = nla_parse_deprecated_strict(a, OVS_USERSPACE_ATTR_MAX,
+					    nla_data(attr), nla_len(attr),
 					    userspace_policy, NULL);
 	if (error)
 		return error;
@@ -3157,6 +3106,28 @@ static int validate_and_copy_check_pkt_len(struct net *net,
 	return 0;
 }
 
+static int validate_psample(const struct nlattr *attr)
+{
+	static const struct nla_policy policy[OVS_PSAMPLE_ATTR_MAX + 1] = {
+		[OVS_PSAMPLE_ATTR_GROUP] = { .type = NLA_U32 },
+		[OVS_PSAMPLE_ATTR_COOKIE] = {
+			.type = NLA_BINARY,
+			.len = OVS_PSAMPLE_COOKIE_MAX_SIZE,
+		},
+	};
+	struct nlattr *a[OVS_PSAMPLE_ATTR_MAX + 1];
+	int err;
+
+	if (!IS_ENABLED(CONFIG_PSAMPLE))
+		return -EOPNOTSUPP;
+
+	err = nla_parse_nested(a, OVS_PSAMPLE_ATTR_MAX, attr, policy, NULL);
+	if (err)
+		return err;
+
+	return a[OVS_PSAMPLE_ATTR_GROUP] ? 0 : -EINVAL;
+}
+
 static int copy_action(const struct nlattr *from,
 		       struct sw_flow_actions **sfa, bool log)
 {
@@ -3212,6 +3183,7 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 			[OVS_ACTION_ATTR_ADD_MPLS] = sizeof(struct ovs_action_add_mpls),
 			[OVS_ACTION_ATTR_DEC_TTL] = (u32)-1,
 			[OVS_ACTION_ATTR_DROP] = sizeof(u32),
+			[OVS_ACTION_ATTR_PSAMPLE] = (u32)-1,
 		};
 		const struct ovs_action_push_vlan *vlan;
 		int type = nla_type(a);
@@ -3424,7 +3396,7 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 					return -EINVAL;
 			}
 			mac_proto = MAC_PROTO_NONE;
-			if (!validate_nsh(nla_data(a), false, true, true))
+			if (!validate_push_nsh(a, log))
 				return -EINVAL;
 			break;
 
@@ -3490,6 +3462,12 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 				return -EINVAL;
 			break;
 
+		case OVS_ACTION_ATTR_PSAMPLE:
+			err = validate_psample(a);
+			if (err)
+				return err;
+			break;
+
 		default:
 			OVS_NLERR(log, "Unknown Action type %d", type);
 			return -EINVAL;
@@ -3515,7 +3493,7 @@ int ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 	int err;
 	u32 mpls_label_count = 0;
 
-	*sfa = nla_alloc_flow_actions(min(nla_len(attr), MAX_ACTIONS_BUFSIZE));
+	*sfa = nla_alloc_flow_actions(nla_len(attr));
 	if (IS_ERR(*sfa))
 		return PTR_ERR(*sfa);
 

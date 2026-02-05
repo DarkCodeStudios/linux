@@ -220,9 +220,6 @@ static int acpi_parse_psvt(acpi_handle handle, int *psvt_count, struct psvt **ps
 	int i, result = 0;
 	struct psvt *psvts;
 
-	if (!acpi_has_method(handle, "PSVT"))
-		return -ENODEV;
-
 	status = acpi_evaluate_object(handle, "PSVT", NULL, &buffer);
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
@@ -564,7 +561,6 @@ static const struct file_operations acpi_thermal_rel_fops = {
 	.open		= acpi_thermal_rel_open,
 	.release	= acpi_thermal_rel_release,
 	.unlocked_ioctl	= acpi_thermal_rel_ioctl,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice acpi_thermal_rel_misc_device = {

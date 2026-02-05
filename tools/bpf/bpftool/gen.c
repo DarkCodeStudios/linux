@@ -670,7 +670,7 @@ static void codegen_destroy(struct bpf_object *obj, const char *obj_name)
 			continue;
 		if (bpf_map__is_internal(map) &&
 		    (bpf_map__map_flags(map) & BPF_F_MMAPABLE))
-			printf("\tskel_free_map_data(skel->%1$s, skel->maps.%1$s.initial_value, %2$zd);\n",
+			printf("\tskel_free_map_data(skel->%1$s, skel->maps.%1$s.initial_value, %2$zu);\n",
 			       ident, bpf_map_mmap_sz(map));
 		codegen("\
 			\n\
@@ -688,9 +688,16 @@ static void codegen_destroy(struct bpf_object *obj, const char *obj_name)
 static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *header_guard)
 {
 	DECLARE_LIBBPF_OPTS(gen_loader_opts, opts);
+	struct bpf_load_and_run_opts sopts = {};
+	char sig_buf[MAX_SIG_SIZE];
+	__u8 prog_sha[SHA256_DIGEST_LENGTH];
 	struct bpf_map *map;
+
 	char ident[256];
 	int err = 0;
+
+	if (sign_progs)
+		opts.gen_hash = true;
 
 	err = bpf_object__gen_loader(obj, &opts);
 	if (err)
@@ -701,6 +708,7 @@ static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *h
 		p_err("failed to load object file");
 		goto out;
 	}
+
 	/* If there was no error during load then gen_loader_opts
 	 * are populated with the loader program.
 	 */
@@ -780,8 +788,52 @@ static int gen_trace(struct bpf_object *obj, const char *obj_name, const char *h
 	print_hex(opts.insns, opts.insns_sz);
 	codegen("\
 		\n\
-		\";							    \n\
-									    \n\
+		\";\n");
+
+	if (sign_progs) {
+		sopts.insns = opts.insns;
+		sopts.insns_sz = opts.insns_sz;
+		sopts.excl_prog_hash = prog_sha;
+		sopts.excl_prog_hash_sz = sizeof(prog_sha);
+		sopts.signature = sig_buf;
+		sopts.signature_sz = MAX_SIG_SIZE;
+
+		err = bpftool_prog_sign(&sopts);
+		if (err < 0) {
+			p_err("failed to sign program");
+			goto out;
+		}
+
+		codegen("\
+		\n\
+			static const char opts_sig[] __attribute__((__aligned__(8))) = \"\\\n\
+		");
+		print_hex((const void *)sig_buf, sopts.signature_sz);
+		codegen("\
+		\n\
+		\";\n");
+
+		codegen("\
+		\n\
+			static const char opts_excl_hash[] __attribute__((__aligned__(8))) = \"\\\n\
+		");
+		print_hex((const void *)prog_sha, sizeof(prog_sha));
+		codegen("\
+		\n\
+		\";\n");
+
+		codegen("\
+		\n\
+			opts.signature = (void *)opts_sig;			\n\
+			opts.signature_sz = sizeof(opts_sig) - 1;		\n\
+			opts.excl_prog_hash = (void *)opts_excl_hash;		\n\
+			opts.excl_prog_hash_sz = sizeof(opts_excl_hash) - 1;	\n\
+			opts.keyring_id = skel->keyring_id;			\n\
+		");
+	}
+
+	codegen("\
+		\n\
 			opts.ctx = (struct bpf_loader_ctx *)skel;	    \n\
 			opts.data_sz = sizeof(opts_data) - 1;		    \n\
 			opts.data = (void *)opts_data;			    \n\
@@ -848,28 +900,45 @@ out:
 }
 
 static void
-codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped)
+codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped, bool populate_links)
 {
 	struct bpf_map *map;
 	char ident[256];
-	size_t i;
+	size_t i, map_sz;
 
 	if (!map_cnt)
 		return;
 
+	/* for backward compatibility with old libbpf versions that don't
+	 * handle new BPF skeleton with new struct bpf_map_skeleton definition
+	 * that includes link field, avoid specifying new increased size,
+	 * unless we absolutely have to (i.e., if there are struct_ops maps
+	 * present)
+	 */
+	map_sz = offsetof(struct bpf_map_skeleton, link);
+	if (populate_links) {
+		bpf_object__for_each_map(map, obj) {
+			if (bpf_map__type(map) == BPF_MAP_TYPE_STRUCT_OPS) {
+				map_sz = sizeof(struct bpf_map_skeleton);
+				break;
+			}
+		}
+	}
+
 	codegen("\
 		\n\
-									\n\
+								    \n\
 			/* maps */				    \n\
 			s->map_cnt = %zu;			    \n\
-			s->map_skel_sz = sizeof(*s->maps);	    \n\
-			s->maps = (struct bpf_map_skeleton *)calloc(s->map_cnt, s->map_skel_sz);\n\
+			s->map_skel_sz = %zu;			    \n\
+			s->maps = (struct bpf_map_skeleton *)calloc(s->map_cnt,\n\
+					sizeof(*s->maps) > %zu ? sizeof(*s->maps) : %zu);\n\
 			if (!s->maps) {				    \n\
 				err = -ENOMEM;			    \n\
 				goto err;			    \n\
 			}					    \n\
 		",
-		map_cnt
+		map_cnt, map_sz, map_sz, map_sz
 	);
 	i = 0;
 	bpf_object__for_each_map(map, obj) {
@@ -878,15 +947,22 @@ codegen_maps_skeleton(struct bpf_object *obj, size_t map_cnt, bool mmaped)
 
 		codegen("\
 			\n\
-									\n\
-				s->maps[%zu].name = \"%s\";	    \n\
-				s->maps[%zu].map = &obj->maps.%s;   \n\
+								    \n\
+				map = (struct bpf_map_skeleton *)((char *)s->maps + %zu * s->map_skel_sz);\n\
+				map->name = \"%s\";		    \n\
+				map->map = &obj->maps.%s;	    \n\
 			",
-			i, bpf_map__name(map), i, ident);
+			i, bpf_map__name(map), ident);
 		/* memory-mapped internal maps */
 		if (mmaped && is_mmapable_map(map, ident, sizeof(ident))) {
-			printf("\ts->maps[%zu].mmaped = (void **)&obj->%s;\n",
-				i, ident);
+			printf("\tmap->mmaped = (void **)&obj->%s;\n", ident);
+		}
+
+		if (populate_links && bpf_map__type(map) == BPF_MAP_TYPE_STRUCT_OPS) {
+			codegen("\
+				\n\
+					map->link = &obj->links.%s; \n\
+				", ident);
 		}
 		i++;
 	}
@@ -960,7 +1036,7 @@ static int walk_st_ops_shadow_vars(struct btf *btf, const char *ident,
 
 		offset = m->offset / 8;
 		if (next_offset < offset)
-			printf("\t\t\tchar __padding_%d[%d];\n", i, offset - next_offset);
+			printf("\t\t\tchar __padding_%d[%u];\n", i, offset - next_offset);
 
 		switch (btf_kind(member_type)) {
 		case BTF_KIND_INT:
@@ -1028,7 +1104,7 @@ static int walk_st_ops_shadow_vars(struct btf *btf, const char *ident,
 	/* Cannot fail since it must be a struct type */
 	size = btf__resolve_size(btf, map_type_id);
 	if (next_offset < (__u32)size)
-		printf("\t\t\tchar __padding_end[%d];\n", size - next_offset);
+		printf("\t\t\tchar __padding_end[%u];\n", size - next_offset);
 
 out:
 	btf_dump__free(d);
@@ -1141,7 +1217,7 @@ static void gen_st_ops_shadow_init(struct btf *btf, struct bpf_object *obj)
 static int do_skeleton(int argc, char **argv)
 {
 	char header_guard[MAX_OBJ_NAME_LEN + sizeof("__SKEL_H__")];
-	size_t map_cnt = 0, prog_cnt = 0, file_sz, mmap_sz;
+	size_t map_cnt = 0, prog_cnt = 0, attach_map_cnt = 0, file_sz, mmap_sz;
 	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts);
 	char obj_name[MAX_OBJ_NAME_LEN] = "", *obj_data;
 	struct bpf_object *obj = NULL;
@@ -1216,7 +1292,7 @@ static int do_skeleton(int argc, char **argv)
 		err = -errno;
 		libbpf_strerror(err, err_buf, sizeof(err_buf));
 		p_err("failed to open BPF object file: %s", err_buf);
-		goto out;
+		goto out_obj;
 	}
 
 	bpf_object__for_each_map(map, obj) {
@@ -1225,6 +1301,10 @@ static int do_skeleton(int argc, char **argv)
 			      bpf_map__name(map));
 			continue;
 		}
+
+		if (bpf_map__type(map) == BPF_MAP_TYPE_STRUCT_OPS)
+			attach_map_cnt++;
+
 		map_cnt++;
 	}
 	bpf_object__for_each_program(prog, obj) {
@@ -1259,6 +1339,8 @@ static int do_skeleton(int argc, char **argv)
 		#include <errno.h>					    \n\
 		#include <stdlib.h>					    \n\
 		#include <bpf/libbpf.h>					    \n\
+									    \n\
+		#define BPF_SKEL_SUPPORTS_MAP_AUTO_ATTACH 1		    \n\
 									    \n\
 		struct %1$s {						    \n\
 			struct bpf_object_skeleton *skeleton;		    \n\
@@ -1297,6 +1379,9 @@ static int do_skeleton(int argc, char **argv)
 				       bpf_program__name(prog));
 		}
 		printf("\t} progs;\n");
+	}
+
+	if (prog_cnt + attach_map_cnt) {
 		printf("\tstruct {\n");
 		bpf_object__for_each_program(prog, obj) {
 			if (use_loader)
@@ -1306,7 +1391,27 @@ static int do_skeleton(int argc, char **argv)
 				printf("\t\tstruct bpf_link *%s;\n",
 				       bpf_program__name(prog));
 		}
+
+		bpf_object__for_each_map(map, obj) {
+			if (!get_map_ident(map, ident, sizeof(ident)))
+				continue;
+			if (bpf_map__type(map) != BPF_MAP_TYPE_STRUCT_OPS)
+				continue;
+
+			if (use_loader)
+				printf("t\tint %s_fd;\n", ident);
+			else
+				printf("\t\tstruct bpf_link *%s;\n", ident);
+		}
+
 		printf("\t} links;\n");
+	}
+
+	if (sign_progs) {
+		codegen("\
+		\n\
+			__s32 keyring_id;				   \n\
+		");
 	}
 
 	if (btf) {
@@ -1433,6 +1538,7 @@ static int do_skeleton(int argc, char **argv)
 		%1$s__create_skeleton(struct %1$s *obj)			    \n\
 		{							    \n\
 			struct bpf_object_skeleton *s;			    \n\
+			struct bpf_map_skeleton *map __attribute__((unused));\n\
 			int err;					    \n\
 									    \n\
 			s = (struct bpf_object_skeleton *)calloc(1, sizeof(*s));\n\
@@ -1448,7 +1554,7 @@ static int do_skeleton(int argc, char **argv)
 		obj_name
 	);
 
-	codegen_maps_skeleton(obj, map_cnt, true /*mmaped*/);
+	codegen_maps_skeleton(obj, map_cnt, true /*mmaped*/, true /*links*/);
 	codegen_progs_skeleton(obj, prog_cnt, true /*populate_links*/);
 
 	codegen("\
@@ -1505,6 +1611,7 @@ static int do_skeleton(int argc, char **argv)
 	err = 0;
 out:
 	bpf_object__close(obj);
+out_obj:
 	if (obj_data)
 		munmap(obj_data, mmap_sz);
 	close(fd);
@@ -1723,6 +1830,7 @@ static int do_subskeleton(int argc, char **argv)
 		{							    \n\
 			struct %1$s *obj;				    \n\
 			struct bpf_object_subskeleton *s;		    \n\
+			struct bpf_map_skeleton *map __attribute__((unused));\n\
 			int err;					    \n\
 									    \n\
 			obj = (struct %1$s *)calloc(1, sizeof(*obj));	    \n\
@@ -1786,7 +1894,7 @@ static int do_subskeleton(int argc, char **argv)
 		}
 	}
 
-	codegen_maps_skeleton(obj, map_cnt, false /*mmaped*/);
+	codegen_maps_skeleton(obj, map_cnt, false /*mmaped*/, false /*links*/);
 	codegen_progs_skeleton(obj, prog_cnt, false /*links*/);
 
 	codegen("\
@@ -1882,7 +1990,7 @@ static int do_help(int argc, char **argv)
 		"       %1$s %2$s help\n"
 		"\n"
 		"       " HELP_SPEC_OPTIONS " |\n"
-		"                    {-L|--use-loader} }\n"
+		"                    {-L|--use-loader} | [ {-S|--sign } {-k} <private_key.pem> {-i} <certificate.x509> ]}\n"
 		"",
 		bin_name, "gen");
 
@@ -2047,7 +2155,7 @@ btfgen_mark_type(struct btfgen_info *info, unsigned int type_id, bool follow_poi
 		break;
 	/* tells if some other type needs to be handled */
 	default:
-		p_err("unsupported kind: %s (%d)", btf_kind_str(btf_type), type_id);
+		p_err("unsupported kind: %s (%u)", btf_kind_str(btf_type), type_id);
 		return -EINVAL;
 	}
 
@@ -2099,7 +2207,7 @@ static int btfgen_record_field_relo(struct btfgen_info *info, struct bpf_core_sp
 			btf_type = btf__type_by_id(btf, type_id);
 			break;
 		default:
-			p_err("unsupported kind: %s (%d)",
+			p_err("unsupported kind: %s (%u)",
 			      btf_kind_str(btf_type), btf_type->type);
 			return -EINVAL;
 		}
@@ -2198,7 +2306,7 @@ static int btfgen_mark_type_match(struct btfgen_info *info, __u32 type_id, bool 
 	}
 	/* tells if some other type needs to be handled */
 	default:
-		p_err("unsupported kind: %s (%d)", btf_kind_str(btf_type), type_id);
+		p_err("unsupported kind: %s (%u)", btf_kind_str(btf_type), type_id);
 		return -EINVAL;
 	}
 
@@ -2379,15 +2487,6 @@ out:
 	return err;
 }
 
-static int btfgen_remap_id(__u32 *type_id, void *ctx)
-{
-	unsigned int *ids = ctx;
-
-	*type_id = ids[*type_id];
-
-	return 0;
-}
-
 /* Generate BTF from relocation information previously recorded */
 static struct btf *btfgen_get_btf(struct btfgen_info *info)
 {
@@ -2467,10 +2566,15 @@ static struct btf *btfgen_get_btf(struct btfgen_info *info)
 	/* second pass: fix up type ids */
 	for (i = 1; i < btf__type_cnt(btf_new); i++) {
 		struct btf_type *btf_type = (struct btf_type *) btf__type_by_id(btf_new, i);
+		struct btf_field_iter it;
+		__u32 *type_id;
 
-		err = btf_type_visit_type_ids(btf_type, btfgen_remap_id, ids);
+		err = btf_field_iter_init(&it, btf_type, BTF_FIELD_ITER_IDS);
 		if (err)
 			goto err_out;
+
+		while ((type_id = btf_field_iter_next(&it)))
+			*type_id = ids[*type_id];
 	}
 
 	free(ids);

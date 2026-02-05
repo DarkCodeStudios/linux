@@ -426,7 +426,7 @@ static int pwm_backlight_initial_power_state(const struct pwm_bl_data *pb)
 
 	/* Not booted with device tree or no phandle link to the node */
 	if (!node || !node->phandle)
-		return FB_BLANK_UNBLANK;
+		return BACKLIGHT_POWER_ON;
 
 	/*
 	 * If the driver is probed from the device tree and there is a
@@ -434,7 +434,7 @@ static int pwm_backlight_initial_power_state(const struct pwm_bl_data *pb)
 	 * assume that another driver will enable the backlight at the
 	 * appropriate time. Therefore, if it is disabled, keep it so.
 	 */
-	return active ? FB_BLANK_UNBLANK: FB_BLANK_POWERDOWN;
+	return active ? BACKLIGHT_POWER_ON : BACKLIGHT_POWER_OFF;
 }
 
 static int pwm_backlight_probe(struct platform_device *pdev)
@@ -697,7 +697,7 @@ static struct platform_driver pwm_backlight_driver = {
 		.of_match_table	= of_match_ptr(pwm_backlight_of_match),
 	},
 	.probe		= pwm_backlight_probe,
-	.remove_new	= pwm_backlight_remove,
+	.remove		= pwm_backlight_remove,
 	.shutdown	= pwm_backlight_shutdown,
 };
 

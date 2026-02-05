@@ -13,7 +13,7 @@
 
 static struct kmem_cache *extent_map_cache;
 
-int __init extent_map_init(void)
+int __init btrfs_extent_map_init(void)
 {
 	extent_map_cache = kmem_cache_create("btrfs_extent_map",
 					     sizeof(struct extent_map), 0, 0, NULL);
@@ -22,7 +22,7 @@ int __init extent_map_init(void)
 	return 0;
 }
 
-void __cold extent_map_exit(void)
+void __cold btrfs_extent_map_exit(void)
 {
 	kmem_cache_destroy(extent_map_cache);
 }
@@ -31,9 +31,9 @@ void __cold extent_map_exit(void)
  * Initialize the extent tree @tree.  Should be called for each new inode or
  * other user of the extent_map interface.
  */
-void extent_map_tree_init(struct extent_map_tree *tree)
+void btrfs_extent_map_tree_init(struct extent_map_tree *tree)
 {
-	tree->map = RB_ROOT_CACHED;
+	tree->root = RB_ROOT;
 	INIT_LIST_HEAD(&tree->modified_extents);
 	rwlock_init(&tree->lock);
 }
@@ -42,7 +42,7 @@ void extent_map_tree_init(struct extent_map_tree *tree)
  * Allocate a new extent_map structure.  The new structure is returned with a
  * reference count of one and needs to be freed using free_extent_map()
  */
-struct extent_map *alloc_extent_map(void)
+struct extent_map *btrfs_alloc_extent_map(void)
 {
 	struct extent_map *em;
 	em = kmem_cache_zalloc(extent_map_cache, GFP_NOFS);
@@ -58,12 +58,12 @@ struct extent_map *alloc_extent_map(void)
  * Drop the reference out on @em by one and free the structure if the reference
  * count hits zero.
  */
-void free_extent_map(struct extent_map *em)
+void btrfs_free_extent_map(struct extent_map *em)
 {
 	if (!em)
 		return;
 	if (refcount_dec_and_test(&em->refs)) {
-		WARN_ON(extent_map_in_tree(em));
+		WARN_ON(btrfs_extent_map_in_tree(em));
 		WARN_ON(!list_empty(&em->list));
 		kmem_cache_free(extent_map_cache, em);
 	}
@@ -77,44 +77,44 @@ static u64 range_end(u64 start, u64 len)
 	return start + len;
 }
 
-static void dec_evictable_extent_maps(struct btrfs_inode *inode)
+static void remove_em(struct btrfs_inode *inode, struct extent_map *em)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 
-	if (!btrfs_is_testing(fs_info) && is_fstree(btrfs_root_id(inode->root)))
+	rb_erase(&em->rb_node, &inode->extent_tree.root);
+	RB_CLEAR_NODE(&em->rb_node);
+
+	if (!btrfs_is_testing(fs_info) && btrfs_is_fstree(btrfs_root_id(inode->root)))
 		percpu_counter_dec(&fs_info->evictable_extent_maps);
 }
 
-static int tree_insert(struct rb_root_cached *root, struct extent_map *em)
+static int tree_insert(struct rb_root *root, struct extent_map *em)
 {
-	struct rb_node **p = &root->rb_root.rb_node;
+	struct rb_node **p = &root->rb_node;
 	struct rb_node *parent = NULL;
 	struct extent_map *entry = NULL;
 	struct rb_node *orig_parent = NULL;
 	u64 end = range_end(em->start, em->len);
-	bool leftmost = true;
 
 	while (*p) {
 		parent = *p;
 		entry = rb_entry(parent, struct extent_map, rb_node);
 
-		if (em->start < entry->start) {
+		if (em->start < entry->start)
 			p = &(*p)->rb_left;
-		} else if (em->start >= extent_map_end(entry)) {
+		else if (em->start >= btrfs_extent_map_end(entry))
 			p = &(*p)->rb_right;
-			leftmost = false;
-		} else {
+		else
 			return -EEXIST;
-		}
 	}
 
 	orig_parent = parent;
-	while (parent && em->start >= extent_map_end(entry)) {
+	while (parent && em->start >= btrfs_extent_map_end(entry)) {
 		parent = rb_next(parent);
 		entry = rb_entry(parent, struct extent_map, rb_node);
 	}
 	if (parent)
-		if (end > entry->start && em->start < extent_map_end(entry))
+		if (end > entry->start && em->start < btrfs_extent_map_end(entry))
 			return -EEXIST;
 
 	parent = orig_parent;
@@ -124,11 +124,11 @@ static int tree_insert(struct rb_root_cached *root, struct extent_map *em)
 		entry = rb_entry(parent, struct extent_map, rb_node);
 	}
 	if (parent)
-		if (end > entry->start && em->start < extent_map_end(entry))
+		if (end > entry->start && em->start < btrfs_extent_map_end(entry))
 			return -EEXIST;
 
 	rb_link_node(&em->rb_node, orig_parent, p);
-	rb_insert_color_cached(&em->rb_node, root, leftmost);
+	rb_insert_color(&em->rb_node, root);
 	return 0;
 }
 
@@ -136,8 +136,8 @@ static int tree_insert(struct rb_root_cached *root, struct extent_map *em)
  * Search through the tree for an extent_map with a given offset.  If it can't
  * be found, try to find some neighboring extents
  */
-static struct rb_node *__tree_search(struct rb_root *root, u64 offset,
-				     struct rb_node **prev_or_next_ret)
+static struct rb_node *tree_search(struct rb_root *root, u64 offset,
+				   struct rb_node **prev_or_next_ret)
 {
 	struct rb_node *n = root->rb_node;
 	struct rb_node *prev = NULL;
@@ -154,14 +154,14 @@ static struct rb_node *__tree_search(struct rb_root *root, u64 offset,
 
 		if (offset < entry->start)
 			n = n->rb_left;
-		else if (offset >= extent_map_end(entry))
+		else if (offset >= btrfs_extent_map_end(entry))
 			n = n->rb_right;
 		else
 			return n;
 	}
 
 	orig_prev = prev;
-	while (prev && offset >= extent_map_end(prev_entry)) {
+	while (prev && offset >= btrfs_extent_map_end(prev_entry)) {
 		prev = rb_next(prev);
 		prev_entry = rb_entry(prev, struct extent_map, rb_node);
 	}
@@ -186,11 +186,22 @@ static struct rb_node *__tree_search(struct rb_root *root, u64 offset,
 	return NULL;
 }
 
+static inline u64 extent_map_block_len(const struct extent_map *em)
+{
+	if (btrfs_extent_map_is_compressed(em))
+		return em->disk_num_bytes;
+	return em->len;
+}
+
 static inline u64 extent_map_block_end(const struct extent_map *em)
 {
-	if (em->block_start + em->block_len < em->block_start)
+	const u64 block_start = btrfs_extent_map_block_start(em);
+	const u64 block_end = block_start + extent_map_block_len(em);
+
+	if (block_end < block_start)
 		return (u64)-1;
-	return em->block_start + em->block_len;
+
+	return block_end;
 }
 
 static bool can_merge_extent_map(const struct extent_map *em)
@@ -199,7 +210,7 @@ static bool can_merge_extent_map(const struct extent_map *em)
 		return false;
 
 	/* Don't merge compressed extents, we need to know their actual size. */
-	if (extent_map_is_compressed(em))
+	if (btrfs_extent_map_is_compressed(em))
 		return false;
 
 	if (em->flags & EXTENT_FLAG_LOGGING)
@@ -219,22 +230,118 @@ static bool can_merge_extent_map(const struct extent_map *em)
 /* Check to see if two extent_map structs are adjacent and safe to merge. */
 static bool mergeable_maps(const struct extent_map *prev, const struct extent_map *next)
 {
-	if (extent_map_end(prev) != next->start)
+	if (btrfs_extent_map_end(prev) != next->start)
 		return false;
 
-	if (prev->flags != next->flags)
+	/*
+	 * The merged flag is not an on-disk flag, it just indicates we had the
+	 * extent maps of 2 (or more) adjacent extents merged, so factor it out.
+	 */
+	if ((prev->flags & ~EXTENT_FLAG_MERGED) !=
+	    (next->flags & ~EXTENT_FLAG_MERGED))
 		return false;
 
-	if (next->block_start < EXTENT_MAP_LAST_BYTE - 1)
-		return next->block_start == extent_map_block_end(prev);
+	if (next->disk_bytenr < EXTENT_MAP_LAST_BYTE - 1)
+		return btrfs_extent_map_block_start(next) == extent_map_block_end(prev);
 
 	/* HOLES and INLINE extents. */
-	return next->block_start == prev->block_start;
+	return next->disk_bytenr == prev->disk_bytenr;
+}
+
+/*
+ * Handle the on-disk data extents merge for @prev and @next.
+ *
+ * @prev:    left extent to merge
+ * @next:    right extent to merge
+ * @merged:  the extent we will not discard after the merge; updated with new values
+ *
+ * After this, one of the two extents is the new merged extent and the other is
+ * removed from the tree and likely freed. Note that @merged is one of @prev/@next
+ * so there is const/non-const aliasing occurring here.
+ *
+ * Only touches disk_bytenr/disk_num_bytes/offset/ram_bytes.
+ * For now only uncompressed regular extent can be merged.
+ */
+static void merge_ondisk_extents(const struct extent_map *prev, const struct extent_map *next,
+				 struct extent_map *merged)
+{
+	u64 new_disk_bytenr;
+	u64 new_disk_num_bytes;
+	u64 new_offset;
+
+	/* @prev and @next should not be compressed. */
+	ASSERT(!btrfs_extent_map_is_compressed(prev));
+	ASSERT(!btrfs_extent_map_is_compressed(next));
+
+	/*
+	 * There are two different cases where @prev and @next can be merged.
+	 *
+	 * 1) They are referring to the same data extent:
+	 *
+	 * |<----- data extent A ----->|
+	 *    |<- prev ->|<- next ->|
+	 *
+	 * 2) They are referring to different data extents but still adjacent:
+	 *
+	 * |<-- data extent A -->|<-- data extent B -->|
+	 *            |<- prev ->|<- next ->|
+	 *
+	 * The calculation here always merges the data extents first, then updates
+	 * @offset using the new data extents.
+	 *
+	 * For case 1), the merged data extent would be the same.
+	 * For case 2), we just merge the two data extents into one.
+	 */
+	new_disk_bytenr = min(prev->disk_bytenr, next->disk_bytenr);
+	new_disk_num_bytes = max(prev->disk_bytenr + prev->disk_num_bytes,
+				 next->disk_bytenr + next->disk_num_bytes) -
+			     new_disk_bytenr;
+	new_offset = prev->disk_bytenr + prev->offset - new_disk_bytenr;
+
+	merged->disk_bytenr = new_disk_bytenr;
+	merged->disk_num_bytes = new_disk_num_bytes;
+	merged->ram_bytes = new_disk_num_bytes;
+	merged->offset = new_offset;
+}
+
+static void dump_extent_map(struct btrfs_fs_info *fs_info, const char *prefix,
+			    struct extent_map *em)
+{
+	if (!IS_ENABLED(CONFIG_BTRFS_DEBUG))
+		return;
+	btrfs_crit(fs_info,
+"%s, start=%llu len=%llu disk_bytenr=%llu disk_num_bytes=%llu ram_bytes=%llu offset=%llu flags=0x%x",
+		prefix, em->start, em->len, em->disk_bytenr, em->disk_num_bytes,
+		em->ram_bytes, em->offset, em->flags);
+	ASSERT(0);
+}
+
+/* Internal sanity checks for btrfs debug builds. */
+static void validate_extent_map(struct btrfs_fs_info *fs_info, struct extent_map *em)
+{
+	if (!IS_ENABLED(CONFIG_BTRFS_DEBUG))
+		return;
+	if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE) {
+		if (em->disk_num_bytes == 0)
+			dump_extent_map(fs_info, "zero disk_num_bytes", em);
+		if (em->offset + em->len > em->ram_bytes)
+			dump_extent_map(fs_info, "ram_bytes too small", em);
+		if (em->offset + em->len > em->disk_num_bytes &&
+		    !btrfs_extent_map_is_compressed(em))
+			dump_extent_map(fs_info, "disk_num_bytes too small", em);
+		if (!btrfs_extent_map_is_compressed(em) &&
+		    em->ram_bytes != em->disk_num_bytes)
+			dump_extent_map(fs_info,
+		"ram_bytes mismatch with disk_num_bytes for non-compressed em",
+					em);
+	} else if (em->offset) {
+		dump_extent_map(fs_info, "non-zero offset for hole/inline", em);
+	}
 }
 
 static void try_merge_map(struct btrfs_inode *inode, struct extent_map *em)
 {
-	struct extent_map_tree *tree = &inode->extent_tree;
+	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct extent_map *merge = NULL;
 	struct rb_node *rb;
 
@@ -254,36 +361,35 @@ static void try_merge_map(struct btrfs_inode *inode, struct extent_map *em)
 
 	if (em->start != 0) {
 		rb = rb_prev(&em->rb_node);
-		if (rb)
-			merge = rb_entry(rb, struct extent_map, rb_node);
+		merge = rb_entry_safe(rb, struct extent_map, rb_node);
+
 		if (rb && can_merge_extent_map(merge) && mergeable_maps(merge, em)) {
 			em->start = merge->start;
-			em->orig_start = merge->orig_start;
 			em->len += merge->len;
-			em->block_len += merge->block_len;
-			em->block_start = merge->block_start;
 			em->generation = max(em->generation, merge->generation);
+
+			if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE)
+				merge_ondisk_extents(merge, em, em);
 			em->flags |= EXTENT_FLAG_MERGED;
 
-			rb_erase_cached(&merge->rb_node, &tree->map);
-			RB_CLEAR_NODE(&merge->rb_node);
-			free_extent_map(merge);
-			dec_evictable_extent_maps(inode);
+			validate_extent_map(fs_info, em);
+			remove_em(inode, merge);
+			btrfs_free_extent_map(merge);
 		}
 	}
 
 	rb = rb_next(&em->rb_node);
-	if (rb)
-		merge = rb_entry(rb, struct extent_map, rb_node);
+	merge = rb_entry_safe(rb, struct extent_map, rb_node);
+
 	if (rb && can_merge_extent_map(merge) && mergeable_maps(em, merge)) {
 		em->len += merge->len;
-		em->block_len += merge->block_len;
-		rb_erase_cached(&merge->rb_node, &tree->map);
-		RB_CLEAR_NODE(&merge->rb_node);
+		if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE)
+			merge_ondisk_extents(em, merge, em);
+		validate_extent_map(fs_info, em);
 		em->generation = max(em->generation, merge->generation);
 		em->flags |= EXTENT_FLAG_MERGED;
-		free_extent_map(merge);
-		dec_evictable_extent_maps(inode);
+		remove_em(inode, merge);
+		btrfs_free_extent_map(merge);
 	}
 }
 
@@ -303,7 +409,7 @@ static void try_merge_map(struct btrfs_inode *inode, struct extent_map *em)
  * 	    -ENOENT  when the extent is not found in the tree
  * 	    -EUCLEAN if the found extent does not match the expected start
  */
-int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
+int btrfs_unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct extent_map_tree *tree = &inode->extent_tree;
@@ -311,7 +417,7 @@ int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 	struct extent_map *em;
 
 	write_lock(&tree->lock);
-	em = lookup_extent_mapping(tree, start, len);
+	em = btrfs_lookup_extent_mapping(tree, start, len);
 
 	if (WARN_ON(!em)) {
 		btrfs_warn(fs_info,
@@ -338,23 +444,23 @@ int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 
 out:
 	write_unlock(&tree->lock);
-	free_extent_map(em);
+	btrfs_free_extent_map(em);
 	return ret;
 
 }
 
-void clear_em_logging(struct btrfs_inode *inode, struct extent_map *em)
+void btrfs_clear_em_logging(struct btrfs_inode *inode, struct extent_map *em)
 {
 	lockdep_assert_held_write(&inode->extent_tree.lock);
 
 	em->flags &= ~EXTENT_FLAG_LOGGING;
-	if (extent_map_in_tree(em))
+	if (btrfs_extent_map_in_tree(em))
 		try_merge_map(inode, em);
 }
 
 static inline void setup_extent_mapping(struct btrfs_inode *inode,
 					struct extent_map *em,
-					int modified)
+					bool modified)
 {
 	refcount_inc(&em->refs);
 
@@ -380,7 +486,7 @@ static inline void setup_extent_mapping(struct btrfs_inode *inode,
  * taken, or a reference dropped if the merge attempt was successful.
  */
 static int add_extent_mapping(struct btrfs_inode *inode,
-			      struct extent_map *em, int modified)
+			      struct extent_map *em, bool modified)
 {
 	struct extent_map_tree *tree = &inode->extent_tree;
 	struct btrfs_root *root = inode->root;
@@ -389,28 +495,28 @@ static int add_extent_mapping(struct btrfs_inode *inode,
 
 	lockdep_assert_held_write(&tree->lock);
 
-	ret = tree_insert(&tree->map, em);
+	validate_extent_map(fs_info, em);
+	ret = tree_insert(&tree->root, em);
 	if (ret)
 		return ret;
 
 	setup_extent_mapping(inode, em, modified);
 
-	if (!btrfs_is_testing(fs_info) && is_fstree(btrfs_root_id(root)))
+	if (!btrfs_is_testing(fs_info) && btrfs_is_fstree(btrfs_root_id(root)))
 		percpu_counter_inc(&fs_info->evictable_extent_maps);
 
 	return 0;
 }
 
-static struct extent_map *
-__lookup_extent_mapping(struct extent_map_tree *tree,
-			u64 start, u64 len, int strict)
+static struct extent_map *lookup_extent_mapping(struct extent_map_tree *tree,
+						u64 start, u64 len, bool strict)
 {
 	struct extent_map *em;
 	struct rb_node *rb_node;
 	struct rb_node *prev_or_next = NULL;
 	u64 end = range_end(start, len);
 
-	rb_node = __tree_search(&tree->map.rb_root, start, &prev_or_next);
+	rb_node = tree_search(&tree->root, start, &prev_or_next);
 	if (!rb_node) {
 		if (prev_or_next)
 			rb_node = prev_or_next;
@@ -420,7 +526,7 @@ __lookup_extent_mapping(struct extent_map_tree *tree,
 
 	em = rb_entry(rb_node, struct extent_map, rb_node);
 
-	if (strict && !(end > em->start && start < extent_map_end(em)))
+	if (strict && !(end > em->start && start < btrfs_extent_map_end(em)))
 		return NULL;
 
 	refcount_inc(&em->refs);
@@ -439,10 +545,10 @@ __lookup_extent_mapping(struct extent_map_tree *tree,
  * intersect, so check the object returned carefully to make sure that no
  * additional lookups are needed.
  */
-struct extent_map *lookup_extent_mapping(struct extent_map_tree *tree,
-					 u64 start, u64 len)
+struct extent_map *btrfs_lookup_extent_mapping(struct extent_map_tree *tree,
+					       u64 start, u64 len)
 {
-	return __lookup_extent_mapping(tree, start, len, 1);
+	return lookup_extent_mapping(tree, start, len, true);
 }
 
 /*
@@ -457,10 +563,10 @@ struct extent_map *lookup_extent_mapping(struct extent_map_tree *tree,
  *
  * If one can't be found, any nearby extent may be returned
  */
-struct extent_map *search_extent_mapping(struct extent_map_tree *tree,
-					 u64 start, u64 len)
+struct extent_map *btrfs_search_extent_mapping(struct extent_map_tree *tree,
+					       u64 start, u64 len)
 {
-	return __lookup_extent_mapping(tree, start, len, 0);
+	return lookup_extent_mapping(tree, start, len, false);
 }
 
 /*
@@ -472,35 +578,36 @@ struct extent_map *search_extent_mapping(struct extent_map_tree *tree,
  * Remove @em from the extent tree of @inode.  No reference counts are dropped,
  * and no checks are done to see if the range is in use.
  */
-void remove_extent_mapping(struct btrfs_inode *inode, struct extent_map *em)
+void btrfs_remove_extent_mapping(struct btrfs_inode *inode, struct extent_map *em)
 {
 	struct extent_map_tree *tree = &inode->extent_tree;
 
 	lockdep_assert_held_write(&tree->lock);
 
 	WARN_ON(em->flags & EXTENT_FLAG_PINNED);
-	rb_erase_cached(&em->rb_node, &tree->map);
 	if (!(em->flags & EXTENT_FLAG_LOGGING))
 		list_del_init(&em->list);
-	RB_CLEAR_NODE(&em->rb_node);
 
-	dec_evictable_extent_maps(inode);
+	remove_em(inode, em);
 }
 
 static void replace_extent_mapping(struct btrfs_inode *inode,
 				   struct extent_map *cur,
 				   struct extent_map *new,
-				   int modified)
+				   bool modified)
 {
+	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct extent_map_tree *tree = &inode->extent_tree;
 
 	lockdep_assert_held_write(&tree->lock);
 
+	validate_extent_map(fs_info, new);
+
 	WARN_ON(cur->flags & EXTENT_FLAG_PINNED);
-	ASSERT(extent_map_in_tree(cur));
+	ASSERT(btrfs_extent_map_in_tree(cur));
 	if (!(cur->flags & EXTENT_FLAG_LOGGING))
 		list_del_init(&cur->list);
-	rb_replace_node_cached(&cur->rb_node, &new->rb_node, &tree->map);
+	rb_replace_node(&cur->rb_node, &new->rb_node, &tree->root);
 	RB_CLEAR_NODE(&cur->rb_node);
 
 	setup_extent_mapping(inode, new, modified);
@@ -543,7 +650,7 @@ static noinline int merge_extent_mapping(struct btrfs_inode *inode,
 	u64 end;
 	u64 start_diff;
 
-	if (map_start < em->start || map_start >= extent_map_end(em))
+	if (map_start < em->start || map_start >= btrfs_extent_map_end(em))
 		return -EINVAL;
 
 	if (existing->start > map_start) {
@@ -554,19 +661,16 @@ static noinline int merge_extent_mapping(struct btrfs_inode *inode,
 		next = next_extent_map(prev);
 	}
 
-	start = prev ? extent_map_end(prev) : em->start;
+	start = prev ? btrfs_extent_map_end(prev) : em->start;
 	start = max_t(u64, start, em->start);
-	end = next ? next->start : extent_map_end(em);
-	end = min_t(u64, end, extent_map_end(em));
+	end = next ? next->start : btrfs_extent_map_end(em);
+	end = min_t(u64, end, btrfs_extent_map_end(em));
 	start_diff = start - em->start;
 	em->start = start;
 	em->len = end - start;
-	if (em->block_start < EXTENT_MAP_LAST_BYTE &&
-	    !extent_map_is_compressed(em)) {
-		em->block_start += start_diff;
-		em->block_len = em->len;
-	}
-	return add_extent_mapping(inode, em, 0);
+	if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE)
+		em->offset += start_diff;
+	return add_extent_mapping(inode, em, false);
 }
 
 /*
@@ -600,10 +704,10 @@ int btrfs_add_extent_mapping(struct btrfs_inode *inode,
 	 * Tree-checker should have rejected any inline extent with non-zero
 	 * file offset. Here just do a sanity check.
 	 */
-	if (em->block_start == EXTENT_MAP_INLINE)
+	if (em->disk_bytenr == EXTENT_MAP_INLINE)
 		ASSERT(em->start == 0);
 
-	ret = add_extent_mapping(inode, em, 0);
+	ret = add_extent_mapping(inode, em, false);
 	/* it is possible that someone inserted the extent into the tree
 	 * while we had the lock dropped.  It is also possible that
 	 * an overlapping map exists in the tree
@@ -611,7 +715,7 @@ int btrfs_add_extent_mapping(struct btrfs_inode *inode,
 	if (ret == -EEXIST) {
 		struct extent_map *existing;
 
-		existing = search_extent_mapping(&inode->extent_tree, start, len);
+		existing = btrfs_search_extent_mapping(&inode->extent_tree, start, len);
 
 		trace_btrfs_handle_em_exist(fs_info, existing, em, start, len);
 
@@ -620,8 +724,8 @@ int btrfs_add_extent_mapping(struct btrfs_inode *inode,
 		 * extent causing the -EEXIST.
 		 */
 		if (start >= existing->start &&
-		    start < extent_map_end(existing)) {
-			free_extent_map(em);
+		    start < btrfs_extent_map_end(existing)) {
+			btrfs_free_extent_map(em);
 			*em_in = existing;
 			ret = 0;
 		} else {
@@ -634,14 +738,14 @@ int btrfs_add_extent_mapping(struct btrfs_inode *inode,
 			 */
 			ret = merge_extent_mapping(inode, existing, em, start);
 			if (WARN_ON(ret)) {
-				free_extent_map(em);
+				btrfs_free_extent_map(em);
 				*em_in = NULL;
 				btrfs_warn(fs_info,
 "extent map merge error existing [%llu, %llu) with em [%llu, %llu) start %llu",
-					   existing->start, extent_map_end(existing),
+					   existing->start, btrfs_extent_map_end(existing),
 					   orig_start, orig_start + orig_len, start);
 			}
-			free_extent_map(existing);
+			btrfs_free_extent_map(existing);
 		}
 	}
 
@@ -657,18 +761,23 @@ int btrfs_add_extent_mapping(struct btrfs_inode *inode,
 static void drop_all_extent_maps_fast(struct btrfs_inode *inode)
 {
 	struct extent_map_tree *tree = &inode->extent_tree;
+	struct rb_node *node;
 
 	write_lock(&tree->lock);
-	while (!RB_EMPTY_ROOT(&tree->map.rb_root)) {
+	node = rb_first(&tree->root);
+	while (node) {
 		struct extent_map *em;
-		struct rb_node *node;
+		struct rb_node *next = rb_next(node);
 
-		node = rb_first_cached(&tree->map);
 		em = rb_entry(node, struct extent_map, rb_node);
 		em->flags &= ~(EXTENT_FLAG_PINNED | EXTENT_FLAG_LOGGING);
-		remove_extent_mapping(inode, em);
-		free_extent_map(em);
-		cond_resched_rwlock_write(&tree->lock);
+		btrfs_remove_extent_mapping(inode, em);
+		btrfs_free_extent_map(em);
+
+		if (cond_resched_rwlock_write(&tree->lock))
+			node = rb_first(&tree->root);
+		else
+			node = next;
 	}
 	write_unlock(&tree->lock);
 }
@@ -716,20 +825,19 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 	 * range ends after our range (and they might be the same extent map),
 	 * because we need to split those two extent maps at the boundaries.
 	 */
-	split = alloc_extent_map();
-	split2 = alloc_extent_map();
+	split = btrfs_alloc_extent_map();
+	split2 = btrfs_alloc_extent_map();
 
 	write_lock(&em_tree->lock);
-	em = lookup_extent_mapping(em_tree, start, len);
+	em = btrfs_lookup_extent_mapping(em_tree, start, len);
 
 	while (em) {
 		/* extent_map_end() returns exclusive value (last byte + 1). */
-		const u64 em_end = extent_map_end(em);
+		const u64 em_end = btrfs_extent_map_end(em);
 		struct extent_map *next_em = NULL;
 		u64 gen;
 		unsigned long flags;
 		bool modified;
-		bool compressed;
 
 		if (em_end < end) {
 			next_em = next_extent_map(em);
@@ -763,7 +871,6 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 			goto remove_em;
 
 		gen = em->generation;
-		compressed = extent_map_is_compressed(em);
 
 		if (em->start < start) {
 			if (!split) {
@@ -775,29 +882,22 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 			split->start = em->start;
 			split->len = start - em->start;
 
-			if (em->block_start < EXTENT_MAP_LAST_BYTE) {
-				split->orig_start = em->orig_start;
-				split->block_start = em->block_start;
-
-				if (compressed)
-					split->block_len = em->block_len;
-				else
-					split->block_len = split->len;
-				split->orig_block_len = max(split->block_len,
-						em->orig_block_len);
+			if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE) {
+				split->disk_bytenr = em->disk_bytenr;
+				split->disk_num_bytes = em->disk_num_bytes;
+				split->offset = em->offset;
 				split->ram_bytes = em->ram_bytes;
 			} else {
-				split->orig_start = split->start;
-				split->block_len = 0;
-				split->block_start = em->block_start;
-				split->orig_block_len = 0;
+				split->disk_bytenr = em->disk_bytenr;
+				split->disk_num_bytes = 0;
+				split->offset = 0;
 				split->ram_bytes = split->len;
 			}
 
 			split->generation = gen;
 			split->flags = flags;
 			replace_extent_mapping(inode, em, split, modified);
-			free_extent_map(split);
+			btrfs_free_extent_map(split);
 			split = split2;
 			split2 = NULL;
 		}
@@ -810,33 +910,21 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 			}
 			split->start = end;
 			split->len = em_end - end;
-			split->block_start = em->block_start;
+			split->disk_bytenr = em->disk_bytenr;
 			split->flags = flags;
 			split->generation = gen;
 
-			if (em->block_start < EXTENT_MAP_LAST_BYTE) {
-				split->orig_block_len = max(em->block_len,
-						    em->orig_block_len);
-
+			if (em->disk_bytenr < EXTENT_MAP_LAST_BYTE) {
+				split->disk_num_bytes = em->disk_num_bytes;
+				split->offset = em->offset + end - em->start;
 				split->ram_bytes = em->ram_bytes;
-				if (compressed) {
-					split->block_len = em->block_len;
-					split->orig_start = em->orig_start;
-				} else {
-					const u64 diff = end - em->start;
-
-					split->block_len = split->len;
-					split->block_start += diff;
-					split->orig_start = em->orig_start;
-				}
 			} else {
+				split->disk_num_bytes = 0;
+				split->offset = 0;
 				split->ram_bytes = split->len;
-				split->orig_start = split->start;
-				split->block_len = 0;
-				split->orig_block_len = 0;
 			}
 
-			if (extent_map_in_tree(em)) {
+			if (btrfs_extent_map_in_tree(em)) {
 				replace_extent_mapping(inode, em, split, modified);
 			} else {
 				int ret;
@@ -847,11 +935,11 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 				if (WARN_ON(ret != 0) && modified)
 					btrfs_set_inode_full_sync(inode);
 			}
-			free_extent_map(split);
+			btrfs_free_extent_map(split);
 			split = NULL;
 		}
 remove_em:
-		if (extent_map_in_tree(em)) {
+		if (btrfs_extent_map_in_tree(em)) {
 			/*
 			 * If the extent map is still in the tree it means that
 			 * either of the following is true:
@@ -876,25 +964,25 @@ remove_em:
 				ASSERT(!split);
 				btrfs_set_inode_full_sync(inode);
 			}
-			remove_extent_mapping(inode, em);
+			btrfs_remove_extent_mapping(inode, em);
 		}
 
 		/*
 		 * Once for the tree reference (we replaced or removed the
 		 * extent map from the tree).
 		 */
-		free_extent_map(em);
+		btrfs_free_extent_map(em);
 next:
 		/* Once for us (for our lookup reference). */
-		free_extent_map(em);
+		btrfs_free_extent_map(em);
 
 		em = next_em;
 	}
 
 	write_unlock(&em_tree->lock);
 
-	free_extent_map(split);
-	free_extent_map(split2);
+	btrfs_free_extent_map(split);
+	btrfs_free_extent_map(split2);
 }
 
 /*
@@ -918,7 +1006,7 @@ int btrfs_replace_extent_map_range(struct btrfs_inode *inode,
 	struct extent_map_tree *tree = &inode->extent_tree;
 	int ret;
 
-	ASSERT(!extent_map_in_tree(new_em));
+	ASSERT(!btrfs_extent_map_in_tree(new_em));
 
 	/*
 	 * The caller has locked an appropriate file range in the inode's io
@@ -944,8 +1032,8 @@ int btrfs_replace_extent_map_range(struct btrfs_inode *inode,
  *
  * This function is used when an ordered_extent needs to be split.
  */
-int split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pre,
-		     u64 new_logical)
+int btrfs_split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pre,
+			   u64 new_logical)
 {
 	struct extent_map_tree *em_tree = &inode->extent_tree;
 	struct extent_map *em;
@@ -957,26 +1045,26 @@ int split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pre,
 	ASSERT(pre != 0);
 	ASSERT(pre < len);
 
-	split_pre = alloc_extent_map();
+	split_pre = btrfs_alloc_extent_map();
 	if (!split_pre)
 		return -ENOMEM;
-	split_mid = alloc_extent_map();
+	split_mid = btrfs_alloc_extent_map();
 	if (!split_mid) {
 		ret = -ENOMEM;
 		goto out_free_pre;
 	}
 
-	lock_extent(&inode->io_tree, start, start + len - 1, NULL);
+	btrfs_lock_extent(&inode->io_tree, start, start + len - 1, NULL);
 	write_lock(&em_tree->lock);
-	em = lookup_extent_mapping(em_tree, start, len);
-	if (!em) {
+	em = btrfs_lookup_extent_mapping(em_tree, start, len);
+	if (unlikely(!em)) {
 		ret = -EIO;
 		goto out_unlock;
 	}
 
 	ASSERT(em->len == len);
-	ASSERT(!extent_map_is_compressed(em));
-	ASSERT(em->block_start < EXTENT_MAP_LAST_BYTE);
+	ASSERT(!btrfs_extent_map_is_compressed(em));
+	ASSERT(em->disk_bytenr < EXTENT_MAP_LAST_BYTE);
 	ASSERT(em->flags & EXTENT_FLAG_PINNED);
 	ASSERT(!(em->flags & EXTENT_FLAG_LOGGING));
 	ASSERT(!list_empty(&em->list));
@@ -987,15 +1075,14 @@ int split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pre,
 	/* First, replace the em with a new extent_map starting from * em->start */
 	split_pre->start = em->start;
 	split_pre->len = pre;
-	split_pre->orig_start = split_pre->start;
-	split_pre->block_start = new_logical;
-	split_pre->block_len = split_pre->len;
-	split_pre->orig_block_len = split_pre->block_len;
+	split_pre->disk_bytenr = new_logical;
+	split_pre->disk_num_bytes = split_pre->len;
+	split_pre->offset = 0;
 	split_pre->ram_bytes = split_pre->len;
 	split_pre->flags = flags;
 	split_pre->generation = em->generation;
 
-	replace_extent_mapping(inode, em, split_pre, 1);
+	replace_extent_mapping(inode, em, split_pre, true);
 
 	/*
 	 * Now we only have an extent_map at:
@@ -1005,35 +1092,42 @@ int split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pre,
 	/* Insert the middle extent_map. */
 	split_mid->start = em->start + pre;
 	split_mid->len = em->len - pre;
-	split_mid->orig_start = split_mid->start;
-	split_mid->block_start = em->block_start + pre;
-	split_mid->block_len = split_mid->len;
-	split_mid->orig_block_len = split_mid->block_len;
+	split_mid->disk_bytenr = btrfs_extent_map_block_start(em) + pre;
+	split_mid->disk_num_bytes = split_mid->len;
+	split_mid->offset = 0;
 	split_mid->ram_bytes = split_mid->len;
 	split_mid->flags = flags;
 	split_mid->generation = em->generation;
-	add_extent_mapping(inode, split_mid, 1);
+	add_extent_mapping(inode, split_mid, true);
 
 	/* Once for us */
-	free_extent_map(em);
+	btrfs_free_extent_map(em);
 	/* Once for the tree */
-	free_extent_map(em);
+	btrfs_free_extent_map(em);
 
 out_unlock:
 	write_unlock(&em_tree->lock);
-	unlock_extent(&inode->io_tree, start, start + len - 1, NULL);
-	free_extent_map(split_mid);
+	btrfs_unlock_extent(&inode->io_tree, start, start + len - 1, NULL);
+	btrfs_free_extent_map(split_mid);
 out_free_pre:
-	free_extent_map(split_pre);
+	btrfs_free_extent_map(split_pre);
 	return ret;
 }
 
-static long btrfs_scan_inode(struct btrfs_inode *inode, long *scanned, long nr_to_scan)
+struct btrfs_em_shrink_ctx {
+	long nr_to_scan;
+	long scanned;
+};
+
+static long btrfs_scan_inode(struct btrfs_inode *inode, struct btrfs_em_shrink_ctx *ctx)
 {
-	const u64 cur_fs_gen = btrfs_get_fs_generation(inode->root->fs_info);
+	struct btrfs_fs_info *fs_info = inode->root->fs_info;
+	const u64 cur_fs_gen = btrfs_get_fs_generation(fs_info);
 	struct extent_map_tree *tree = &inode->extent_tree;
 	long nr_dropped = 0;
 	struct rb_node *node;
+
+	lockdep_assert_held_write(&tree->lock);
 
 	/*
 	 * Take the mmap lock so that we serialize with the inode logging phase
@@ -1046,25 +1140,19 @@ static long btrfs_scan_inode(struct btrfs_inode *inode, long *scanned, long nr_t
 	 * to find new extents, which may not be there yet because ordered
 	 * extents haven't completed yet.
 	 *
-	 * We also do a try lock because otherwise we could deadlock. This is
-	 * because the shrinker for this filesystem may be invoked while we are
-	 * in a path that is holding the mmap lock in write mode. For example in
-	 * a reflink operation while COWing an extent buffer, when allocating
-	 * pages for a new extent buffer and under memory pressure, the shrinker
-	 * may be invoked, and therefore we would deadlock by attempting to read
-	 * lock the mmap lock while we are holding already a write lock on it.
+	 * We also do a try lock because we don't want to block for too long and
+	 * we are holding the extent map tree's lock in write mode.
 	 */
 	if (!down_read_trylock(&inode->i_mmap_lock))
 		return 0;
 
-	write_lock(&tree->lock);
-	node = rb_first_cached(&tree->map);
+	node = rb_first(&tree->root);
 	while (node) {
+		struct rb_node *next = rb_next(node);
 		struct extent_map *em;
 
 		em = rb_entry(node, struct extent_map, rb_node);
-		node = rb_next(node);
-		(*scanned)++;
+		ctx->scanned++;
 
 		if (em->flags & EXTENT_FLAG_PINNED)
 			goto next;
@@ -1079,49 +1167,102 @@ static long btrfs_scan_inode(struct btrfs_inode *inode, long *scanned, long nr_t
 		if (!list_empty(&em->list) && em->generation >= cur_fs_gen)
 			btrfs_set_inode_full_sync(inode);
 
-		remove_extent_mapping(inode, em);
+		btrfs_remove_extent_mapping(inode, em);
 		trace_btrfs_extent_map_shrinker_remove_em(inode, em);
 		/* Drop the reference for the tree. */
-		free_extent_map(em);
+		btrfs_free_extent_map(em);
 		nr_dropped++;
 next:
-		if (*scanned >= nr_to_scan)
+		if (ctx->scanned >= ctx->nr_to_scan)
 			break;
 
 		/*
-		 * Restart if we had to reschedule, and any extent maps that were
-		 * pinned before may have become unpinned after we released the
-		 * lock and took it again.
+		 * Stop if we need to reschedule or there's contention on the
+		 * lock. This is to avoid slowing other tasks trying to take the
+		 * lock.
 		 */
-		if (cond_resched_rwlock_write(&tree->lock))
-			node = rb_first_cached(&tree->map);
+		if (need_resched() || rwlock_needbreak(&tree->lock) ||
+		    btrfs_fs_closing(fs_info))
+			break;
+		node = next;
 	}
-	write_unlock(&tree->lock);
 	up_read(&inode->i_mmap_lock);
 
 	return nr_dropped;
 }
 
-static long btrfs_scan_root(struct btrfs_root *root, long *scanned, long nr_to_scan)
+static struct btrfs_inode *find_first_inode_to_shrink(struct btrfs_root *root,
+						      u64 min_ino)
+{
+	struct btrfs_inode *inode;
+	unsigned long from = min_ino;
+
+	xa_lock(&root->inodes);
+	while (true) {
+		struct extent_map_tree *tree;
+
+		inode = xa_find(&root->inodes, &from, ULONG_MAX, XA_PRESENT);
+		if (!inode)
+			break;
+
+		tree = &inode->extent_tree;
+
+		/*
+		 * We want to be fast so if the lock is busy we don't want to
+		 * spend time waiting for it (some task is about to do IO for
+		 * the inode).
+		 */
+		if (!write_trylock(&tree->lock))
+			goto next;
+
+		/*
+		 * Skip inode if it doesn't have loaded extent maps, so we avoid
+		 * getting a reference and doing an iput later. This includes
+		 * cases like files that were opened for things like stat(2), or
+		 * files with all extent maps previously released through the
+		 * release folio callback (btrfs_release_folio()) or released in
+		 * a previous run, or directories which never have extent maps.
+		 */
+		if (RB_EMPTY_ROOT(&tree->root)) {
+			write_unlock(&tree->lock);
+			goto next;
+		}
+
+		if (igrab(&inode->vfs_inode))
+			break;
+
+		write_unlock(&tree->lock);
+next:
+		from = btrfs_ino(inode) + 1;
+		cond_resched_lock(&root->inodes.xa_lock);
+	}
+	xa_unlock(&root->inodes);
+
+	return inode;
+}
+
+static long btrfs_scan_root(struct btrfs_root *root, struct btrfs_em_shrink_ctx *ctx)
 {
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_inode *inode;
 	long nr_dropped = 0;
-	u64 min_ino = fs_info->extent_map_shrinker_last_ino + 1;
+	u64 min_ino = fs_info->em_shrinker_last_ino + 1;
 
-	inode = btrfs_find_first_inode(root, min_ino);
+	inode = find_first_inode_to_shrink(root, min_ino);
 	while (inode) {
-		nr_dropped += btrfs_scan_inode(inode, scanned, nr_to_scan);
+		nr_dropped += btrfs_scan_inode(inode, ctx);
+		write_unlock(&inode->extent_tree.lock);
 
 		min_ino = btrfs_ino(inode) + 1;
-		fs_info->extent_map_shrinker_last_ino = btrfs_ino(inode);
+		fs_info->em_shrinker_last_ino = btrfs_ino(inode);
 		iput(&inode->vfs_inode);
 
-		if (*scanned >= nr_to_scan)
+		if (ctx->scanned >= ctx->nr_to_scan || btrfs_fs_closing(fs_info))
 			break;
 
 		cond_resched();
-		inode = btrfs_find_first_inode(root, min_ino);
+
+		inode = find_first_inode_to_shrink(root, min_ino);
 	}
 
 	if (inode) {
@@ -1132,36 +1273,47 @@ static long btrfs_scan_root(struct btrfs_root *root, long *scanned, long nr_to_s
 		 * inode if there is one or we will find out this was the last
 		 * one and move to the next root.
 		 */
-		fs_info->extent_map_shrinker_last_root = btrfs_root_id(root);
+		fs_info->em_shrinker_last_root = btrfs_root_id(root);
 	} else {
 		/*
 		 * No more inodes in this root, set extent_map_shrinker_last_ino to 0 so
 		 * that when processing the next root we start from its first inode.
 		 */
-		fs_info->extent_map_shrinker_last_ino = 0;
-		fs_info->extent_map_shrinker_last_root = btrfs_root_id(root) + 1;
+		fs_info->em_shrinker_last_ino = 0;
+		fs_info->em_shrinker_last_root = btrfs_root_id(root) + 1;
 	}
 
 	return nr_dropped;
 }
 
-long btrfs_free_extent_maps(struct btrfs_fs_info *fs_info, long nr_to_scan)
+static void btrfs_extent_map_shrinker_worker(struct work_struct *work)
 {
-	const u64 start_root_id = fs_info->extent_map_shrinker_last_root;
-	u64 next_root_id = start_root_id;
+	struct btrfs_fs_info *fs_info;
+	struct btrfs_em_shrink_ctx ctx;
+	u64 start_root_id;
+	u64 next_root_id;
 	bool cycled = false;
 	long nr_dropped = 0;
-	long scanned = 0;
+
+	fs_info = container_of(work, struct btrfs_fs_info, em_shrinker_work);
+
+	ctx.scanned = 0;
+	ctx.nr_to_scan = atomic64_read(&fs_info->em_shrinker_nr_to_scan);
+
+	start_root_id = fs_info->em_shrinker_last_root;
+	next_root_id = fs_info->em_shrinker_last_root;
 
 	if (trace_btrfs_extent_map_shrinker_scan_enter_enabled()) {
 		s64 nr = percpu_counter_sum_positive(&fs_info->evictable_extent_maps);
 
-		trace_btrfs_extent_map_shrinker_scan_enter(fs_info, nr_to_scan, nr);
+		trace_btrfs_extent_map_shrinker_scan_enter(fs_info, nr);
 	}
 
-	while (scanned < nr_to_scan) {
+	while (ctx.scanned < ctx.nr_to_scan && !btrfs_fs_closing(fs_info)) {
 		struct btrfs_root *root;
 		unsigned long count;
+
+		cond_resched();
 
 		spin_lock(&fs_info->fs_roots_radix_lock);
 		count = radix_tree_gang_lookup(&fs_info->fs_roots_radix,
@@ -1171,8 +1323,8 @@ long btrfs_free_extent_maps(struct btrfs_fs_info *fs_info, long nr_to_scan)
 			spin_unlock(&fs_info->fs_roots_radix_lock);
 			if (start_root_id > 0 && !cycled) {
 				next_root_id = 0;
-				fs_info->extent_map_shrinker_last_root = 0;
-				fs_info->extent_map_shrinker_last_ino = 0;
+				fs_info->em_shrinker_last_root = 0;
+				fs_info->em_shrinker_last_ino = 0;
 				cycled = true;
 				continue;
 			}
@@ -1185,8 +1337,8 @@ long btrfs_free_extent_maps(struct btrfs_fs_info *fs_info, long nr_to_scan)
 		if (!root)
 			continue;
 
-		if (is_fstree(btrfs_root_id(root)))
-			nr_dropped += btrfs_scan_root(root, &scanned, nr_to_scan);
+		if (btrfs_is_fstree(btrfs_root_id(root)))
+			nr_dropped += btrfs_scan_root(root, &ctx);
 
 		btrfs_put_root(root);
 	}
@@ -1197,5 +1349,34 @@ long btrfs_free_extent_maps(struct btrfs_fs_info *fs_info, long nr_to_scan)
 		trace_btrfs_extent_map_shrinker_scan_exit(fs_info, nr_dropped, nr);
 	}
 
-	return nr_dropped;
+	atomic64_set(&fs_info->em_shrinker_nr_to_scan, 0);
+}
+
+void btrfs_free_extent_maps(struct btrfs_fs_info *fs_info, long nr_to_scan)
+{
+	/*
+	 * Do nothing if the shrinker is already running. In case of high memory
+	 * pressure we can have a lot of tasks calling us and all passing the
+	 * same nr_to_scan value, but in reality we may need only to free
+	 * nr_to_scan extent maps (or less). In case we need to free more than
+	 * that, we will be called again by the fs shrinker, so no worries about
+	 * not doing enough work to reclaim memory from extent maps.
+	 * We can also be repeatedly called with the same nr_to_scan value
+	 * simply because the shrinker runs asynchronously and multiple calls
+	 * to this function are made before the shrinker does enough progress.
+	 *
+	 * That's why we set the atomic counter to nr_to_scan only if its
+	 * current value is zero, instead of incrementing the counter by
+	 * nr_to_scan.
+	 */
+	if (atomic64_cmpxchg(&fs_info->em_shrinker_nr_to_scan, 0, nr_to_scan) != 0)
+		return;
+
+	queue_work(system_dfl_wq, &fs_info->em_shrinker_work);
+}
+
+void btrfs_init_extent_map_shrinker_work(struct btrfs_fs_info *fs_info)
+{
+	atomic64_set(&fs_info->em_shrinker_nr_to_scan, 0);
+	INIT_WORK(&fs_info->em_shrinker_work, btrfs_extent_map_shrinker_worker);
 }

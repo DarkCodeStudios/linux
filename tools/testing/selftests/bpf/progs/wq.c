@@ -5,7 +5,7 @@
 #include "bpf_experimental.h"
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
-#include "../bpf_testmod/bpf_testmod_kfunc.h"
+#include "../test_kmods/bpf_testmod_kfunc.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -32,6 +32,7 @@ struct {
 } hmap_malloc SEC(".maps");
 
 struct elem {
+	int ok_offset;
 	struct bpf_wq w;
 };
 
@@ -53,7 +54,7 @@ __u32 ok;
 __u32 ok_sleepable;
 
 static int test_elem_callback(void *map, int *key,
-		int (callback_fn)(void *map, int *key, struct bpf_wq *wq))
+		int (callback_fn)(void *map, int *key, void *value))
 {
 	struct elem init = {}, *val;
 	struct bpf_wq *wq;
@@ -70,6 +71,8 @@ static int test_elem_callback(void *map, int *key,
 	if (!val)
 		return -2;
 
+	val->ok_offset = *key;
+
 	wq = &val->w;
 	if (bpf_wq_init(wq, map, 0) != 0)
 		return -3;
@@ -84,7 +87,7 @@ static int test_elem_callback(void *map, int *key,
 }
 
 static int test_hmap_elem_callback(void *map, int *key,
-		int (callback_fn)(void *map, int *key, struct bpf_wq *wq))
+		int (callback_fn)(void *map, int *key, void *value))
 {
 	struct hmap_elem init = {}, *val;
 	struct bpf_wq *wq;
@@ -114,7 +117,7 @@ static int test_hmap_elem_callback(void *map, int *key,
 }
 
 /* callback for non sleepable workqueue */
-static int wq_callback(void *map, int *key, struct bpf_wq *work)
+static int wq_callback(void *map, int *key, void *value)
 {
 	bpf_kfunc_common_test();
 	ok |= (1 << *key);
@@ -122,10 +125,16 @@ static int wq_callback(void *map, int *key, struct bpf_wq *work)
 }
 
 /* callback for sleepable workqueue */
-static int wq_cb_sleepable(void *map, int *key, struct bpf_wq *work)
+static int wq_cb_sleepable(void *map, int *key, void *value)
 {
+	struct elem *data = (struct elem *)value;
+	int offset = data->ok_offset;
+
+	if (*key != offset)
+		return 0;
+
 	bpf_kfunc_call_test_sleepable();
-	ok_sleepable |= (1 << *key);
+	ok_sleepable |= (1 << offset);
 	return 0;
 }
 
@@ -177,4 +186,21 @@ long test_call_lru_sleepable(void *ctx)
 	int key = 4;
 
 	return test_elem_callback(&lru, &key, wq_callback);
+}
+
+SEC("tc")
+long test_map_no_btf(void *ctx)
+{
+	struct elem *val;
+	struct bpf_wq *wq;
+	int key = 42;
+
+	val = bpf_map_lookup_elem(&array, &key);
+	if (!val)
+		return -2;
+
+	wq = &val->w;
+	if (bpf_wq_init(wq, &array, 0) != 0)
+		return -3;
+	return 0;
 }

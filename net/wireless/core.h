@@ -3,7 +3,7 @@
  * Wireless configuration interface internals.
  *
  * Copyright 2006-2010	Johannes Berg <johannes@sipsolutions.net>
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  */
 #ifndef __NET_WIRELESS_CORE_H
 #define __NET_WIRELESS_CORE_H
@@ -20,6 +20,13 @@
 
 
 #define WIPHY_IDX_INVALID	-1
+
+struct cfg80211_scan_request_int {
+	struct cfg80211_scan_info info;
+	bool notified;
+	/* must be last - variable members */
+	struct cfg80211_scan_request req;
+};
 
 struct cfg80211_registered_device {
 	const struct cfg80211_ops *ops;
@@ -70,8 +77,8 @@ struct cfg80211_registered_device {
 	struct rb_root bss_tree;
 	u32 bss_generation;
 	u32 bss_entries;
-	struct cfg80211_scan_request *scan_req; /* protected by RTNL */
-	struct cfg80211_scan_request *int_scan_req;
+	struct cfg80211_scan_request_int *scan_req; /* protected by RTNL */
+	struct cfg80211_scan_request_int *int_scan_req;
 	struct sk_buff *scan_msg;
 	struct list_head sched_scan_req_list;
 	time64_t suspend_at;
@@ -170,11 +177,16 @@ static inline int for_each_rdev_check_rtnl(void)
 	if (for_each_rdev_check_rtnl()) {} else				\
 		list_for_each_entry(rdev, &cfg80211_rdev_list, list)
 
+enum bss_source_type {
+	BSS_SOURCE_DIRECT = 0,
+	BSS_SOURCE_MBSSID,
+	BSS_SOURCE_STA_PROFILE,
+};
+
 struct cfg80211_internal_bss {
 	struct list_head list;
 	struct list_head hidden_list;
 	struct rb_node rbn;
-	u64 ts_boottime;
 	unsigned long ts;
 	unsigned long refcount;
 	atomic_t hold;
@@ -190,6 +202,8 @@ struct cfg80211_internal_bss {
 	 * when the beacon/probe was received.
 	 */
 	u8 parent_bssid[ETH_ALEN] __aligned(2);
+
+	enum bss_source_type bss_source;
 
 	/* must be last because of priv member */
 	struct cfg80211_bss pub;
@@ -475,6 +489,7 @@ cfg80211_start_background_radar_detection(struct cfg80211_registered_device *rde
 					  struct wireless_dev *wdev,
 					  struct cfg80211_chan_def *chandef);
 
+void cfg80211_stop_radar_detection(struct wireless_dev *wdev);
 void cfg80211_stop_background_radar_detection(struct wireless_dev *wdev);
 
 void cfg80211_background_cac_done_wk(struct work_struct *work);
@@ -494,7 +509,8 @@ bool cfg80211_wdev_on_sub_chan(struct wireless_dev *wdev,
 			       bool primary_only);
 bool _cfg80211_chandef_usable(struct wiphy *wiphy,
 			      const struct cfg80211_chan_def *chandef,
-			      u32 prohibited_flags, bool monitor);
+			      u32 prohibited_flags,
+			      u32 permitting_flags);
 
 static inline unsigned int elapsed_jiffies_msecs(unsigned long start)
 {
@@ -507,6 +523,7 @@ static inline unsigned int elapsed_jiffies_msecs(unsigned long start)
 }
 
 int cfg80211_set_monitor_channel(struct cfg80211_registered_device *rdev,
+				 struct net_device *dev,
 				 struct cfg80211_chan_def *chandef);
 
 int ieee80211_get_ratemask(struct ieee80211_supported_band *sband,
@@ -532,6 +549,11 @@ struct cfg80211_internal_bss *
 cfg80211_bss_update(struct cfg80211_registered_device *rdev,
 		    struct cfg80211_internal_bss *tmp,
 		    bool signal_valid, unsigned long ts);
+
+enum ieee80211_ap_reg_power
+cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len,
+			     u32 client_flags);
+
 #ifdef CONFIG_CFG80211_DEVELOPER_WARNINGS
 #define CFG80211_DEV_WARN_ON(cond)	WARN_ON(cond)
 #else
@@ -552,6 +574,10 @@ void cfg80211_remove_links(struct wireless_dev *wdev);
 int cfg80211_remove_virtual_intf(struct cfg80211_registered_device *rdev,
 				 struct wireless_dev *wdev);
 void cfg80211_wdev_release_link_bsses(struct wireless_dev *wdev, u16 link_mask);
+
+int cfg80211_assoc_ml_reconf(struct cfg80211_registered_device *rdev,
+			     struct net_device *dev,
+			     struct cfg80211_ml_reconf_req *req);
 
 /**
  * struct cfg80211_colocated_ap - colocated AP information

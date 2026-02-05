@@ -24,7 +24,20 @@ void flush_icache_all(void)
 
 	if (num_online_cpus() < 2)
 		return;
-	else if (riscv_use_sbi_for_rfence())
+
+	/*
+	 * Make sure all previous writes to the D$ are ordered before making
+	 * the IPI. The RISC-V spec states that a hart must execute a data fence
+	 * before triggering a remote fence.i in order to make the modification
+	 * visable for remote harts.
+	 *
+	 * IPIs on RISC-V are triggered by MMIO writes to either CLINT or
+	 * S-IMSIC, so the fence ensures previous data writes "happen before"
+	 * the MMIO.
+	 */
+	RISCV_FENCE(w, o);
+
+	if (riscv_use_sbi_for_rfence())
 		sbi_remote_fence_i(NULL);
 	else
 		on_each_cpu(ipi_remote_fence_i, NULL, 1);
@@ -88,9 +101,9 @@ void flush_icache_pte(struct mm_struct *mm, pte_t pte)
 {
 	struct folio *folio = page_folio(pte_page(pte));
 
-	if (!test_bit(PG_dcache_clean, &folio->flags)) {
+	if (!test_bit(PG_dcache_clean, &folio->flags.f)) {
 		flush_icache_mm(mm, false);
-		set_bit(PG_dcache_clean, &folio->flags);
+		set_bit(PG_dcache_clean, &folio->flags.f);
 	}
 }
 #endif /* CONFIG_MMU */
@@ -100,6 +113,9 @@ EXPORT_SYMBOL_GPL(riscv_cbom_block_size);
 
 unsigned int riscv_cboz_block_size;
 EXPORT_SYMBOL_GPL(riscv_cboz_block_size);
+
+unsigned int riscv_cbop_block_size;
+EXPORT_SYMBOL_GPL(riscv_cbop_block_size);
 
 static void __init cbo_get_block_size(struct device_node *node,
 				      const char *name, u32 *block_size,
@@ -125,8 +141,8 @@ static void __init cbo_get_block_size(struct device_node *node,
 
 void __init riscv_init_cbo_blocksizes(void)
 {
-	unsigned long cbom_hartid, cboz_hartid;
-	u32 cbom_block_size = 0, cboz_block_size = 0;
+	unsigned long cbom_hartid, cboz_hartid, cbop_hartid;
+	u32 cbom_block_size = 0, cboz_block_size = 0, cbop_block_size = 0;
 	struct device_node *node;
 	struct acpi_table_header *rhct;
 	acpi_status status;
@@ -138,13 +154,15 @@ void __init riscv_init_cbo_blocksizes(void)
 					   &cbom_block_size, &cbom_hartid);
 			cbo_get_block_size(node, "riscv,cboz-block-size",
 					   &cboz_block_size, &cboz_hartid);
+			cbo_get_block_size(node, "riscv,cbop-block-size",
+					   &cbop_block_size, &cbop_hartid);
 		}
 	} else {
 		status = acpi_get_table(ACPI_SIG_RHCT, 0, &rhct);
 		if (ACPI_FAILURE(status))
 			return;
 
-		acpi_get_cbo_block_size(rhct, &cbom_block_size, &cboz_block_size, NULL);
+		acpi_get_cbo_block_size(rhct, &cbom_block_size, &cboz_block_size, &cbop_block_size);
 		acpi_put_table((struct acpi_table_header *)rhct);
 	}
 
@@ -153,11 +171,15 @@ void __init riscv_init_cbo_blocksizes(void)
 
 	if (cboz_block_size)
 		riscv_cboz_block_size = cboz_block_size;
+
+	if (cbop_block_size)
+		riscv_cbop_block_size = cbop_block_size;
 }
 
 #ifdef CONFIG_SMP
 static void set_icache_stale_mask(void)
 {
+	int cpu = get_cpu();
 	cpumask_t *mask;
 	bool stale_cpu;
 
@@ -168,10 +190,11 @@ static void set_icache_stale_mask(void)
 	 * concurrently on different harts.
 	 */
 	mask = &current->mm->context.icache_stale_mask;
-	stale_cpu = cpumask_test_cpu(smp_processor_id(), mask);
+	stale_cpu = cpumask_test_cpu(cpu, mask);
 
 	cpumask_setall(mask);
-	cpumask_assign_cpu(smp_processor_id(), mask, stale_cpu);
+	__assign_cpu(cpu, mask, stale_cpu);
+	put_cpu();
 }
 #endif
 
@@ -239,14 +262,12 @@ int riscv_set_icache_flush_ctx(unsigned long ctx, unsigned long scope)
 	case PR_RISCV_CTX_SW_FENCEI_OFF:
 		switch (scope) {
 		case PR_RISCV_SCOPE_PER_PROCESS:
-			current->mm->context.force_icache_flush = false;
-
 			set_icache_stale_mask();
+			current->mm->context.force_icache_flush = false;
 			break;
 		case PR_RISCV_SCOPE_PER_THREAD:
-			current->thread.force_icache_flush = false;
-
 			set_icache_stale_mask();
+			current->thread.force_icache_flush = false;
 			break;
 		default:
 			return -EINVAL;

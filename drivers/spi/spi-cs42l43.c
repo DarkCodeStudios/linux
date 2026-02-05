@@ -9,8 +9,10 @@
 #include <linux/array_size.h>
 #include <linux/bits.h>
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/errno.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/gpio/property.h>
 #include <linux/mfd/cs42l43.h>
@@ -44,42 +46,10 @@ static const unsigned int cs42l43_clock_divs[] = {
 	2, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30
 };
 
-static const struct software_node ampl = {
-	.name			= "cs35l56-left",
-};
-
-static const struct software_node ampr = {
-	.name			= "cs35l56-right",
-};
-
-static struct spi_board_info ampl_info = {
+static struct spi_board_info amp_info_template = {
 	.modalias		= "cs35l56",
 	.max_speed_hz		= 11 * HZ_PER_MHZ,
-	.chip_select		= 0,
 	.mode			= SPI_MODE_0,
-	.swnode			= &ampl,
-};
-
-static struct spi_board_info ampr_info = {
-	.modalias		= "cs35l56",
-	.max_speed_hz		= 11 * HZ_PER_MHZ,
-	.chip_select		= 1,
-	.mode			= SPI_MODE_0,
-	.swnode			= &ampr,
-};
-
-static const struct software_node cs42l43_gpiochip_swnode = {
-	.name			= "cs42l43-pinctrl",
-};
-
-static const struct software_node_ref_args cs42l43_cs_refs[] = {
-	SOFTWARE_NODE_REFERENCE(&cs42l43_gpiochip_swnode, 0, GPIO_ACTIVE_LOW),
-	SOFTWARE_NODE_REFERENCE(&swnode_gpio_undefined),
-};
-
-static const struct property_entry cs42l43_cs_props[] = {
-	PROPERTY_ENTRY_REF_ARRAY("cs-gpios", cs42l43_cs_refs),
-	{}
 };
 
 static int cs42l43_spi_tx(struct regmap *regmap, const u8 *buf, unsigned int len)
@@ -246,11 +216,39 @@ static size_t cs42l43_spi_max_length(struct spi_device *spi)
 	return CS42L43_SPI_MAX_LENGTH;
 }
 
-static bool cs42l43_has_sidecar(struct fwnode_handle *fwnode)
+static int cs42l43_get_speaker_id_gpios(struct cs42l43_spi *priv, int *result)
+{
+	struct gpio_descs *descs;
+	u32 spkid;
+	int i, ret;
+
+	descs = gpiod_get_array_optional(priv->dev, "spk-id", GPIOD_IN);
+	if (!descs)
+		return 0;
+	else if (IS_ERR(descs))
+		return PTR_ERR(descs);
+
+	spkid = 0;
+	for (i = 0; i < descs->ndescs; i++) {
+		ret = gpiod_get_value_cansleep(descs->desc[i]);
+		if (ret < 0)
+			goto err;
+
+		spkid |= (ret << i);
+	}
+
+	dev_dbg(priv->dev, "spk-id-gpios = %d\n", spkid);
+	*result = spkid;
+err:
+	gpiod_put_array(descs);
+
+	return ret;
+}
+
+static struct fwnode_handle *cs42l43_find_xu_node(struct fwnode_handle *fwnode)
 {
 	static const u32 func_smart_amp = 0x1;
 	struct fwnode_handle *child_fwnode, *ext_fwnode;
-	unsigned int val;
 	u32 function;
 	int ret;
 
@@ -266,21 +264,45 @@ static bool cs42l43_has_sidecar(struct fwnode_handle *fwnode)
 		if (!ext_fwnode)
 			continue;
 
-		ret = fwnode_property_read_u32(ext_fwnode,
-					       "01fa-sidecar-instances",
-					       &val);
-
-		fwnode_handle_put(ext_fwnode);
-
-		if (ret)
-			continue;
-
 		fwnode_handle_put(child_fwnode);
 
-		return !!val;
+		return ext_fwnode;
 	}
 
-	return false;
+	return NULL;
+}
+
+static struct spi_board_info *cs42l43_create_bridge_amp(struct cs42l43_spi *priv,
+							const char * const name,
+							int cs, int spkid)
+{
+	struct property_entry *props = NULL;
+	struct software_node *swnode;
+	struct spi_board_info *info;
+
+	if (spkid >= 0) {
+		props = devm_kcalloc(priv->dev, 2, sizeof(*props), GFP_KERNEL);
+		if (!props)
+			return NULL;
+
+		*props = PROPERTY_ENTRY_U32("cirrus,speaker-id", spkid);
+	}
+
+	swnode = devm_kmalloc(priv->dev, sizeof(*swnode), GFP_KERNEL);
+	if (!swnode)
+		return NULL;
+
+	*swnode = SOFTWARE_NODE(name, props, NULL);
+
+	info = devm_kmemdup(priv->dev, &amp_info_template,
+			    sizeof(amp_info_template), GFP_KERNEL);
+	if (!info)
+		return NULL;
+
+	info->chip_select = cs;
+	info->swnode = swnode;
+
+	return info;
 }
 
 static void cs42l43_release_of_node(void *data)
@@ -288,17 +310,14 @@ static void cs42l43_release_of_node(void *data)
 	fwnode_handle_put(data);
 }
 
-static void cs42l43_release_sw_node(void *data)
-{
-	software_node_unregister(&cs42l43_gpiochip_swnode);
-}
-
 static int cs42l43_spi_probe(struct platform_device *pdev)
 {
 	struct cs42l43 *cs42l43 = dev_get_drvdata(pdev->dev.parent);
 	struct cs42l43_spi *priv;
 	struct fwnode_handle *fwnode = dev_fwnode(cs42l43->dev);
-	bool has_sidecar = cs42l43_has_sidecar(fwnode);
+	struct fwnode_handle *xu_fwnode __free(fwnode_handle) = cs42l43_find_xu_node(fwnode);
+	int nsidecars = 0;
+	int spkid = -EINVAL;
 	int ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
@@ -350,18 +369,31 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 			return ret;
 	}
 
-	if (has_sidecar) {
-		ret = software_node_register(&cs42l43_gpiochip_swnode);
-		if (ret)
-			return dev_err_probe(priv->dev, ret,
-					     "Failed to register gpio swnode\n");
+	fwnode_property_read_u32(xu_fwnode, "01fa-sidecar-instances", &nsidecars);
 
-		ret = devm_add_action_or_reset(priv->dev, cs42l43_release_sw_node, NULL);
-		if (ret)
-			return ret;
+	if (nsidecars) {
+		struct software_node_ref_args args[] = {
+			SOFTWARE_NODE_REFERENCE(fwnode, 0, GPIO_ACTIVE_LOW),
+			SOFTWARE_NODE_REFERENCE(&swnode_gpio_undefined),
+		};
+		struct property_entry props[] = {
+			PROPERTY_ENTRY_REF_ARRAY("cs-gpios", args),
+			{ }
+		};
 
-		ret = device_create_managed_software_node(&priv->ctlr->dev,
-							  cs42l43_cs_props, NULL);
+		ret = fwnode_property_read_u32(xu_fwnode, "01fa-spk-id-val", &spkid);
+		if (!ret) {
+			dev_dbg(priv->dev, "01fa-spk-id-val = %d\n", spkid);
+		} else if (ret != -EINVAL) {
+			return dev_err_probe(priv->dev, ret, "Failed to get spk-id-val\n");
+		} else {
+			ret = cs42l43_get_speaker_id_gpios(priv, &spkid);
+			if (ret < 0)
+				return dev_err_probe(priv->dev, ret,
+						     "Failed to get spk-id-gpios\n");
+		}
+
+		ret = device_create_managed_software_node(&priv->ctlr->dev, props, NULL);
 		if (ret)
 			return dev_err_probe(priv->dev, ret, "Failed to add swnode\n");
 	} else {
@@ -373,12 +405,23 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 		return dev_err_probe(priv->dev, ret,
 				     "Failed to register SPI controller\n");
 
-	if (has_sidecar) {
-		if (!spi_new_device(priv->ctlr, &ampl_info))
+	if (nsidecars) {
+		struct spi_board_info *ampl_info;
+		struct spi_board_info *ampr_info;
+
+		ampl_info = cs42l43_create_bridge_amp(priv, "cs35l56-left", 0, spkid);
+		if (!ampl_info)
+			return -ENOMEM;
+
+		ampr_info = cs42l43_create_bridge_amp(priv, "cs35l56-right", 1, spkid);
+		if (!ampr_info)
+			return -ENOMEM;
+
+		if (!spi_new_device(priv->ctlr, ampl_info))
 			return dev_err_probe(priv->dev, -ENODEV,
 					     "Failed to create left amp slave\n");
 
-		if (!spi_new_device(priv->ctlr, &ampr_info))
+		if (!spi_new_device(priv->ctlr, ampr_info))
 			return dev_err_probe(priv->dev, -ENODEV,
 					     "Failed to create right amp slave\n");
 	}
@@ -401,7 +444,7 @@ static struct platform_driver cs42l43_spi_driver = {
 };
 module_platform_driver(cs42l43_spi_driver);
 
-MODULE_IMPORT_NS(GPIO_SWNODE);
+MODULE_IMPORT_NS("GPIO_SWNODE");
 MODULE_DESCRIPTION("CS42L43 SPI Driver");
 MODULE_AUTHOR("Lucas Tanure <tanureal@opensource.cirrus.com>");
 MODULE_AUTHOR("Maciej Strozek <mstrozek@opensource.cirrus.com>");

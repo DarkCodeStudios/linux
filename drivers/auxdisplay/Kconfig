@@ -316,7 +316,7 @@ endif # PARPORT_PANEL
 
 config PANEL_CHANGE_MESSAGE
 	bool "Change LCD initialization message ?"
-	depends on CHARLCD
+	depends on CHARLCD || LINEDISP
 	help
 	  This allows you to replace the boot message indicating the kernel version
 	  and the driver version with a custom message. This is useful on appliances
@@ -489,7 +489,7 @@ config IMG_ASCII_LCD
 
 config HT16K33
 	tristate "Holtek Ht16K33 LED controller with keyscan"
-	depends on FB && I2C && INPUT
+	depends on FB && I2C && INPUT && BACKLIGHT_CLASS_DEVICE
 	select FB_SYSMEM_HELPERS
 	select INPUT_MATRIXKMAP
 	select FB_BACKLIGHT
@@ -503,6 +503,7 @@ config HT16K33
 config MAX6959
 	tristate "Maxim MAX6958/6959 7-segment LED controller"
 	depends on I2C
+	select BITREVERSE
 	select REGMAP_I2C
 	select LINEDISP
 	help

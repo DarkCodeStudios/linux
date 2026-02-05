@@ -146,7 +146,7 @@
 #include <linux/string.h>
 #include <linux/firmware.h>
 #include <linux/rtnetlink.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 
 #define DRV_NAME		"e100"
@@ -161,7 +161,6 @@
 #define FIRMWARE_D102E		"e100/d102e_ucode.bin"
 
 MODULE_DESCRIPTION(DRV_DESCRIPTION);
-MODULE_AUTHOR(DRV_COPYRIGHT);
 MODULE_LICENSE("GPL v2");
 MODULE_FIRMWARE(FIRMWARE_D101M);
 MODULE_FIRMWARE(FIRMWARE_D101S);
@@ -1683,7 +1682,7 @@ static void e100_adjust_adaptive_ifs(struct nic *nic, int speed, int duplex)
 
 static void e100_watchdog(struct timer_list *t)
 {
-	struct nic *nic = from_timer(nic, t, watchdog);
+	struct nic *nic = timer_container_of(nic, t, watchdog);
 	struct ethtool_cmd cmd = { .cmd = ETHTOOL_GSET };
 	u32 speed;
 
@@ -2294,7 +2293,7 @@ static int e100_up(struct nic *nic)
 	return 0;
 
 err_no_irq:
-	del_timer_sync(&nic->watchdog);
+	timer_delete_sync(&nic->watchdog);
 err_clean_cbs:
 	e100_clean_cbs(nic);
 err_rx_clean_list:
@@ -2309,7 +2308,7 @@ static void e100_down(struct nic *nic)
 	netif_stop_queue(nic->netdev);
 	e100_hw_reset(nic);
 	free_irq(nic->pdev->irq, nic->netdev);
-	del_timer_sync(&nic->watchdog);
+	timer_delete_sync(&nic->watchdog);
 	netif_carrier_off(nic->netdev);
 	e100_clean_cbs(nic);
 	e100_rx_clean_list(nic);

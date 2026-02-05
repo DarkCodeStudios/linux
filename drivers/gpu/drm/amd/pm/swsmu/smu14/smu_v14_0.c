@@ -38,6 +38,8 @@
 #include "amdgpu_ras.h"
 #include "smu_cmn.h"
 
+#include "asic_reg/thm/thm_14_0_2_offset.h"
+#include "asic_reg/thm/thm_14_0_2_sh_mask.h"
 #include "asic_reg/mp/mp_14_0_2_offset.h"
 #include "asic_reg/mp/mp_14_0_2_sh_mask.h"
 
@@ -46,6 +48,8 @@
 #define regMP1_SMN_IH_SW_INT_CTRL_mp1_14_0_0            0x0342
 #define regMP1_SMN_IH_SW_INT_CTRL_mp1_14_0_0_BASE_IDX   0
 
+const int decoded_link_speed[5] = {1, 2, 3, 4, 5};
+const int decoded_link_width[8] = {0, 1, 2, 4, 8, 12, 16, 32};
 /*
  * DO NOT use these for err/warn/info/debug messages.
  * Use dev_err, dev_warn, dev_info and dev_dbg instead.
@@ -58,14 +62,14 @@
 
 MODULE_FIRMWARE("amdgpu/smu_14_0_2.bin");
 MODULE_FIRMWARE("amdgpu/smu_14_0_3.bin");
+MODULE_FIRMWARE("amdgpu/smu_14_0_3_kicker.bin");
 
 #define ENABLE_IMU_ARG_GFXOFF_ENABLE		1
 
 int smu_v14_0_init_microcode(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
-	char fw_name[30];
-	char ucode_prefix[15];
+	char ucode_prefix[30];
 	int err = 0;
 	const struct smc_firmware_header_v1_0 *hdr;
 	const struct common_firmware_header *header;
@@ -76,10 +80,12 @@ int smu_v14_0_init_microcode(struct smu_context *smu)
 		return 0;
 
 	amdgpu_ucode_ip_version_decode(adev, MP1_HWIP, ucode_prefix, sizeof(ucode_prefix));
-
-	snprintf(fw_name, sizeof(fw_name), "amdgpu/%s.bin", ucode_prefix);
-
-	err = amdgpu_ucode_request(adev, &adev->pm.fw, fw_name);
+	if (amdgpu_is_kicker_fw(adev))
+		err = amdgpu_ucode_request(adev, &adev->pm.fw, AMDGPU_UCODE_REQUIRED,
+					   "amdgpu/%s_kicker.bin", ucode_prefix);
+	else
+		err = amdgpu_ucode_request(adev, &adev->pm.fw, AMDGPU_UCODE_REQUIRED,
+					   "amdgpu/%s.bin", ucode_prefix);
 	if (err)
 		goto out;
 
@@ -136,8 +142,7 @@ int smu_v14_0_load_microcode(struct smu_context *smu)
 		    1 & ~MP1_SMN_PUB_CTRL__LX3_RESET_MASK);
 
 	for (i = 0; i < adev->usec_timeout; i++) {
-		if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-			amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1))
+		if (smu->is_apu)
 			mp1_fw_flags = RREG32_PCIE(MP1_Public |
 						   (smnMP1_FIRMWARE_FLAGS_14_0_0 & 0xffffffff));
 		else
@@ -210,8 +215,7 @@ int smu_v14_0_check_fw_status(struct smu_context *smu)
 	struct amdgpu_device *adev = smu->adev;
 	uint32_t mp1_fw_flags;
 
-	if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-		amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1))
+	if (smu->is_apu)
 		mp1_fw_flags = RREG32_PCIE(MP1_Public |
 					   (smnMP1_FIRMWARE_FLAGS_14_0_0 & 0xffffffff));
 	else
@@ -245,6 +249,8 @@ int smu_v14_0_check_fw_version(struct smu_context *smu)
 
 	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
 	case IP_VERSION(14, 0, 0):
+	case IP_VERSION(14, 0, 4):
+	case IP_VERSION(14, 0, 5):
 		smu->smc_driver_if_version = SMU14_DRIVER_IF_VERSION_SMU_V14_0_0;
 		break;
 	case IP_VERSION(14, 0, 1):
@@ -453,17 +459,26 @@ int smu_v14_0_init_smc_tables(struct smu_context *smu)
 			ret = -ENOMEM;
 			goto err3_out;
 		}
+
+		smu_table->user_overdrive_table =
+			kzalloc(tables[SMU_TABLE_OVERDRIVE].size, GFP_KERNEL);
+		if (!smu_table->user_overdrive_table) {
+			ret = -ENOMEM;
+			goto err4_out;
+		}
 	}
 
 	smu_table->combo_pptable =
 		kzalloc(tables[SMU_TABLE_COMBO_PPTABLE].size, GFP_KERNEL);
 	if (!smu_table->combo_pptable) {
 		ret = -ENOMEM;
-		goto err4_out;
+		goto err5_out;
 	}
 
 	return 0;
 
+err5_out:
+	kfree(smu_table->user_overdrive_table);
 err4_out:
 	kfree(smu_table->boot_overdrive_table);
 err3_out:
@@ -758,6 +773,9 @@ int smu_v14_0_gfx_off_control(struct smu_context *smu, bool enable)
 	case IP_VERSION(14, 0, 0):
 	case IP_VERSION(14, 0, 1):
 	case IP_VERSION(14, 0, 2):
+	case IP_VERSION(14, 0, 3):
+	case IP_VERSION(14, 0, 4):
+	case IP_VERSION(14, 0, 5):
 		if (!(adev->pm.pp_feature & PP_GFXOFF_MASK))
 			return 0;
 		if (enable)
@@ -850,16 +868,22 @@ static int smu_v14_0_set_irq_state(struct amdgpu_device *adev,
 				   unsigned tyep,
 				   enum amdgpu_interrupt_state state)
 {
+	struct smu_context *smu = adev->powerplay.pp_handle;
+	uint32_t low, high;
 	uint32_t val = 0;
 
 	switch (state) {
 	case AMDGPU_IRQ_STATE_DISABLE:
 		/* For THM irqs */
-		// TODO
+		val = RREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, THERM_INTH_MASK, 1);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, THERM_INTL_MASK, 1);
+		WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL, val);
+
+		WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_ENA, 0);
 
 		/* For MP1 SW irqs */
-		if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-			amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1)) {
+		if (smu->is_apu) {
 			val = RREG32_SOC15(MP1, 0, regMP1_SMN_IH_SW_INT_CTRL_mp1_14_0_0);
 			val = REG_SET_FIELD(val, MP1_SMN_IH_SW_INT_CTRL, INT_MASK, 1);
 			WREG32_SOC15(MP1, 0, regMP1_SMN_IH_SW_INT_CTRL_mp1_14_0_0, val);
@@ -872,11 +896,27 @@ static int smu_v14_0_set_irq_state(struct amdgpu_device *adev,
 		break;
 	case AMDGPU_IRQ_STATE_ENABLE:
 		/* For THM irqs */
-		// TODO
+		low = max(SMU_THERMAL_MINIMUM_ALERT_TEMP,
+			  smu->thermal_range.min / SMU_TEMPERATURE_UNITS_PER_CENTIGRADES);
+		high = min(SMU_THERMAL_MAXIMUM_ALERT_TEMP,
+			   smu->thermal_range.software_shutdown_temp);
+		val = RREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, MAX_IH_CREDIT, 5);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, THERM_IH_HW_ENA, 1);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, THERM_INTH_MASK, 0);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, THERM_INTL_MASK, 0);
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, DIG_THERM_INTH, (high & 0xff));
+		val = REG_SET_FIELD(val, THM_THERMAL_INT_CTRL, DIG_THERM_INTL, (low & 0xff));
+		val = val & (~THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK);
+		WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL, val);
+
+		val = (1 << THM_THERMAL_INT_ENA__THERM_INTH_CLR__SHIFT);
+		val |= (1 << THM_THERMAL_INT_ENA__THERM_INTL_CLR__SHIFT);
+		val |= (1 << THM_THERMAL_INT_ENA__THERM_TRIGGER_CLR__SHIFT);
+		WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_ENA, val);
 
 		/* For MP1 SW irqs */
-		if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-			amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1)) {
+		if (smu->is_apu) {
 			val = RREG32_SOC15(MP1, 0, regMP1_SMN_IH_SW_INT_mp1_14_0_0);
 			val = REG_SET_FIELD(val, MP1_SMN_IH_SW_INT, ID, 0xFE);
 			val = REG_SET_FIELD(val, MP1_SMN_IH_SW_INT, VALID, 0);
@@ -915,6 +955,14 @@ static int smu_v14_0_irq_process(struct amdgpu_device *adev,
 	uint32_t client_id = entry->client_id;
 	uint32_t src_id = entry->src_id;
 
+	/*
+	 * ctxid is used to distinguish different
+	 * events for SMCToHost interrupt.
+	 */
+	uint32_t ctxid = entry->src_data[0];
+	uint32_t data;
+	uint32_t high;
+
 	if (client_id == SOC15_IH_CLIENTID_THM) {
 		switch (src_id) {
 		case THM_11_0__SRCID__THM_DIG_THERM_L2H:
@@ -928,6 +976,50 @@ static int smu_v14_0_irq_process(struct amdgpu_device *adev,
 			dev_emerg(adev->dev, "ERROR: GPU under temperature range unknown src id (%d)\n",
 				  src_id);
 			break;
+		}
+	} else if (client_id == SOC15_IH_CLIENTID_MP1) {
+		if (src_id == SMU_IH_INTERRUPT_ID_TO_DRIVER) {
+			/* ACK SMUToHost interrupt */
+			data = RREG32_SOC15(MP1, 0, regMP1_SMN_IH_SW_INT_CTRL);
+			data = REG_SET_FIELD(data, MP1_SMN_IH_SW_INT_CTRL, INT_ACK, 1);
+			WREG32_SOC15(MP1, 0, regMP1_SMN_IH_SW_INT_CTRL, data);
+
+			switch (ctxid) {
+			case SMU_IH_INTERRUPT_CONTEXT_ID_FAN_ABNORMAL:
+				high = smu->thermal_range.software_shutdown_temp +
+					smu->thermal_range.software_shutdown_temp_offset;
+				high = min_t(typeof(high),
+					     SMU_THERMAL_MAXIMUM_ALERT_TEMP,
+					     high);
+				dev_emerg(adev->dev, "Reduce soft CTF limit to %d (by an offset %d)\n",
+							high,
+							smu->thermal_range.software_shutdown_temp_offset);
+
+				data = RREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL);
+				data = REG_SET_FIELD(data, THM_THERMAL_INT_CTRL,
+							DIG_THERM_INTH,
+							(high & 0xff));
+				data = data & (~THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK);
+				WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL, data);
+				break;
+			case SMU_IH_INTERRUPT_CONTEXT_ID_FAN_RECOVERY:
+				high = min_t(typeof(high),
+					     SMU_THERMAL_MAXIMUM_ALERT_TEMP,
+					     smu->thermal_range.software_shutdown_temp);
+				dev_emerg(adev->dev, "Recover soft CTF limit to %d\n", high);
+
+				data = RREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL);
+				data = REG_SET_FIELD(data, THM_THERMAL_INT_CTRL,
+							DIG_THERM_INTH,
+							(high & 0xff));
+				data = data & (~THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK);
+				WREG32_SOC15(THM, 0, regTHM_THERMAL_INT_CTRL, data);
+				break;
+			default:
+				dev_dbg(adev->dev, "Unhandled context id %d from client:%d!\n",
+									ctxid, client_id);
+				break;
+			}
 		}
 	}
 
@@ -1070,7 +1162,8 @@ failed:
 int smu_v14_0_set_soft_freq_limited_range(struct smu_context *smu,
 					  enum smu_clk_type clk_type,
 					  uint32_t min,
-					  uint32_t max)
+					  uint32_t max,
+					  bool automatic)
 {
 	int ret = 0, clk_id = 0;
 	uint32_t param;
@@ -1085,7 +1178,11 @@ int smu_v14_0_set_soft_freq_limited_range(struct smu_context *smu,
 		return clk_id;
 
 	if (max > 0) {
-		param = (uint32_t)((clk_id << 16) | (max & 0xffff));
+		max = SMU_V14_SOFT_FREQ_ROUND(max);
+		if (automatic)
+			param = (uint32_t)((clk_id << 16) | 0xffff);
+		else
+			param = (uint32_t)((clk_id << 16) | (max & 0xffff));
 		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetSoftMaxByFreq,
 						      param, NULL);
 		if (ret)
@@ -1093,7 +1190,10 @@ int smu_v14_0_set_soft_freq_limited_range(struct smu_context *smu,
 	}
 
 	if (min > 0) {
-		param = (uint32_t)((clk_id << 16) | (min & 0xffff));
+		if (automatic)
+			param = (uint32_t)((clk_id << 16) | 0);
+		else
+			param = (uint32_t)((clk_id << 16) | (min & 0xffff));
 		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetSoftMinByFreq,
 						      param, NULL);
 		if (ret)
@@ -1170,6 +1270,7 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 	uint32_t dclk_min = 0, dclk_max = 0;
 	uint32_t fclk_min = 0, fclk_max = 0;
 	int ret = 0, i;
+	bool auto_level = false;
 
 	switch (level) {
 	case AMD_DPM_FORCED_LEVEL_HIGH:
@@ -1201,6 +1302,7 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 		dclk_max = dclk_table->max;
 		fclk_min = fclk_table->min;
 		fclk_max = fclk_table->max;
+		auto_level = true;
 		break;
 	case AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
 		sclk_min = sclk_max = pstate_table->gfxclk_pstate.standard;
@@ -1236,7 +1338,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v14_0_set_soft_freq_limited_range(smu,
 							    SMU_GFXCLK,
 							    sclk_min,
-							    sclk_max);
+							    sclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 
@@ -1248,7 +1351,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v14_0_set_soft_freq_limited_range(smu,
 							    SMU_MCLK,
 							    mclk_min,
-							    mclk_max);
+							    mclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 
@@ -1260,7 +1364,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v14_0_set_soft_freq_limited_range(smu,
 							    SMU_SOCCLK,
 							    socclk_min,
-							    socclk_max);
+							    socclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 
@@ -1275,7 +1380,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 			ret = smu_v14_0_set_soft_freq_limited_range(smu,
 								    i ? SMU_VCLK1 : SMU_VCLK,
 								    vclk_min,
-								    vclk_max);
+								    vclk_max,
+								    auto_level);
 			if (ret)
 				return ret;
 		}
@@ -1290,7 +1396,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 			ret = smu_v14_0_set_soft_freq_limited_range(smu,
 								    i ? SMU_DCLK1 : SMU_DCLK,
 								    dclk_min,
-								    dclk_max);
+								    dclk_max,
+								    auto_level);
 			if (ret)
 				return ret;
 		}
@@ -1302,7 +1409,8 @@ int smu_v14_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v14_0_set_soft_freq_limited_range(smu,
 							    SMU_FCLK,
 							    fclk_min,
-							    fclk_max);
+							    fclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 
@@ -1460,33 +1568,28 @@ int smu_v14_0_set_single_dpm_table(struct smu_context *smu,
 }
 
 int smu_v14_0_set_vcn_enable(struct smu_context *smu,
-			     bool enable)
+			      bool enable,
+			      int inst)
 {
 	struct amdgpu_device *adev = smu->adev;
-	int i, ret = 0;
+	int ret = 0;
 
-	for (i = 0; i < adev->vcn.num_vcn_inst; i++) {
-		if (adev->vcn.harvest_config & (1 << i))
-			continue;
+	if (adev->vcn.harvest_config & (1 << inst))
+		return ret;
 
-		if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-		    amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1)) {
-			if (i == 0)
-				ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
-								      SMU_MSG_PowerUpVcn0 : SMU_MSG_PowerDownVcn0,
-								      i << 16U, NULL);
-			else if (i == 1)
-				ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
-								      SMU_MSG_PowerUpVcn1 : SMU_MSG_PowerDownVcn1,
-								      i << 16U, NULL);
-		} else {
+	if (smu->is_apu) {
+		if (inst == 0)
 			ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
-							      SMU_MSG_PowerUpVcn : SMU_MSG_PowerDownVcn,
-							      i << 16U, NULL);
-		}
-
-		if (ret)
-			return ret;
+							      SMU_MSG_PowerUpVcn0 : SMU_MSG_PowerDownVcn0,
+							      inst << 16U, NULL);
+		else if (inst == 1)
+			ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
+							      SMU_MSG_PowerUpVcn1 : SMU_MSG_PowerDownVcn1,
+							      inst << 16U, NULL);
+	} else {
+		ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
+						      SMU_MSG_PowerUpVcn : SMU_MSG_PowerDownVcn,
+						      inst << 16U, NULL);
 	}
 
 	return ret;
@@ -1502,8 +1605,7 @@ int smu_v14_0_set_jpeg_enable(struct smu_context *smu,
 		if (adev->jpeg.harvest_config & (1 << i))
 			continue;
 
-		if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 0) ||
-		    amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(14, 0, 1)) {
+		if (smu->is_apu) {
 			if (i == 0)
 				ret = smu_cmn_send_smc_msg_with_param(smu, enable ?
 								      SMU_MSG_PowerUpJpeg0 : SMU_MSG_PowerDownJpeg0,
@@ -1838,6 +1940,11 @@ int smu_v14_0_od_edit_dpm_table(struct smu_context *smu,
 			dev_err(smu->adev->dev, "Set soft max sclk failed!");
 			return ret;
 		}
+		if (smu->gfx_actual_hard_min_freq != smu->gfx_default_hard_min_freq ||
+		    smu->gfx_actual_soft_max_freq != smu->gfx_default_soft_max_freq)
+			smu->user_dpm_profile.user_od = true;
+		else
+			smu->user_dpm_profile.user_od = false;
 		break;
 	default:
 		return -ENOSYS;
@@ -1846,3 +1953,31 @@ int smu_v14_0_od_edit_dpm_table(struct smu_context *smu,
 	return ret;
 }
 
+static int smu_v14_0_allow_ih_interrupt(struct smu_context *smu)
+{
+	return smu_cmn_send_smc_msg(smu,
+				    SMU_MSG_AllowIHHostInterrupt,
+				    NULL);
+}
+
+int smu_v14_0_enable_thermal_alert(struct smu_context *smu)
+{
+	int ret = 0;
+
+	if (!smu->irq_source.num_types)
+		return 0;
+
+	ret = amdgpu_irq_get(smu->adev, &smu->irq_source, 0);
+	if (ret)
+		return ret;
+
+	return smu_v14_0_allow_ih_interrupt(smu);
+}
+
+int smu_v14_0_disable_thermal_alert(struct smu_context *smu)
+{
+	if (!smu->irq_source.num_types)
+		return 0;
+
+	return amdgpu_irq_put(smu->adev, &smu->irq_source, 0);
+}

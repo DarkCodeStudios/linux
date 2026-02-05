@@ -85,7 +85,7 @@
 #include "vm_helper.h"
 
 #include "link_enc_cfg.h"
-#include "link.h"
+#include "link_service.h"
 
 #define DC_LOGGER_INIT(logger)
 
@@ -706,7 +706,6 @@ static const struct resource_caps res_cap_nv14 = {
 static const struct dc_debug_options debug_defaults_drv = {
 		.disable_dmcu = false,
 		.force_abm_enable = false,
-		.timing_trace = false,
 		.clock_trace = true,
 		.disable_pplib_clock_request = true,
 		.pipe_split_policy = MPC_SPLIT_AVOID_MULT_DISP,
@@ -719,8 +718,11 @@ static const struct dc_debug_options debug_defaults_drv = {
 		.scl_reset_length10 = true,
 		.sanity_checks = false,
 		.underflow_assert_delay_us = 0xFFFFFFFF,
-		.enable_legacy_fast_update = true,
 		.using_dml2 = false,
+};
+
+static const struct dc_check_config config_defaults = {
+		.enable_legacy_fast_update = true,
 };
 
 void dcn20_dpp_destroy(struct dpp **dpp)
@@ -734,7 +736,7 @@ struct dpp *dcn20_dpp_create(
 	uint32_t inst)
 {
 	struct dcn20_dpp *dpp =
-		kzalloc(sizeof(struct dcn20_dpp), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn20_dpp), GFP_KERNEL);
 
 	if (!dpp)
 		return NULL;
@@ -752,7 +754,7 @@ struct input_pixel_processor *dcn20_ipp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn10_ipp *ipp =
-		kzalloc(sizeof(struct dcn10_ipp), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn10_ipp), GFP_KERNEL);
 
 	if (!ipp) {
 		BREAK_TO_DEBUGGER();
@@ -769,7 +771,7 @@ struct output_pixel_processor *dcn20_opp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_opp *opp =
-		kzalloc(sizeof(struct dcn20_opp), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn20_opp), GFP_KERNEL);
 
 	if (!opp) {
 		BREAK_TO_DEBUGGER();
@@ -786,7 +788,7 @@ struct dce_aux *dcn20_aux_engine_create(
 	uint32_t inst)
 {
 	struct aux_engine_dce110 *aux_engine =
-		kzalloc(sizeof(struct aux_engine_dce110), GFP_ATOMIC);
+		kzalloc(sizeof(struct aux_engine_dce110), GFP_KERNEL);
 
 	if (!aux_engine)
 		return NULL;
@@ -824,7 +826,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 	uint32_t inst)
 {
 	struct dce_i2c_hw *dce_i2c_hw =
-		kzalloc(sizeof(struct dce_i2c_hw), GFP_ATOMIC);
+		kzalloc(sizeof(struct dce_i2c_hw), GFP_KERNEL);
 
 	if (!dce_i2c_hw)
 		return NULL;
@@ -836,8 +838,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 }
 struct mpc *dcn20_mpc_create(struct dc_context *ctx)
 {
-	struct dcn20_mpc *mpc20 = kzalloc(sizeof(struct dcn20_mpc),
-					  GFP_ATOMIC);
+	struct dcn20_mpc *mpc20 = kzalloc(sizeof(struct dcn20_mpc), GFP_KERNEL);
 
 	if (!mpc20)
 		return NULL;
@@ -854,8 +855,7 @@ struct mpc *dcn20_mpc_create(struct dc_context *ctx)
 struct hubbub *dcn20_hubbub_create(struct dc_context *ctx)
 {
 	int i;
-	struct dcn20_hubbub *hubbub = kzalloc(sizeof(struct dcn20_hubbub),
-					  GFP_ATOMIC);
+	struct dcn20_hubbub *hubbub = kzalloc(sizeof(struct dcn20_hubbub), GFP_KERNEL);
 
 	if (!hubbub)
 		return NULL;
@@ -883,7 +883,7 @@ struct timing_generator *dcn20_timing_generator_create(
 		uint32_t instance)
 {
 	struct optc *tgn10 =
-		kzalloc(sizeof(struct optc), GFP_ATOMIC);
+		kzalloc(sizeof(struct optc), GFP_KERNEL);
 
 	if (!tgn10)
 		return NULL;
@@ -920,7 +920,7 @@ struct link_encoder *dcn20_link_encoder_create(
 		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
 	int link_regs_id;
 
-	if (!enc20)
+	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 	link_regs_id =
@@ -963,7 +963,7 @@ static struct clock_source *dcn20_clock_source_create(
 	bool dp_clk_src)
 {
 	struct dce110_clk_src *clk_src =
-		kzalloc(sizeof(struct dce110_clk_src), GFP_ATOMIC);
+		kzalloc(sizeof(struct dce110_clk_src), GFP_KERNEL);
 
 	if (!clk_src)
 		return NULL;
@@ -1062,7 +1062,7 @@ struct display_stream_compressor *dcn20_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_dsc *dsc =
-		kzalloc(sizeof(struct dcn20_dsc), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn20_dsc), GFP_KERNEL);
 
 	if (!dsc) {
 		BREAK_TO_DEBUGGER();
@@ -1199,7 +1199,7 @@ struct hubp *dcn20_hubp_create(
 	uint32_t inst)
 {
 	struct dcn20_hubp *hubp2 =
-		kzalloc(sizeof(struct dcn20_hubp), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn20_hubp), GFP_KERNEL);
 
 	if (!hubp2)
 		return NULL;
@@ -1221,7 +1221,7 @@ static void get_pixel_clock_parameters(
 	struct pipe_ctx *odm_pipe;
 	int opp_cnt = 1;
 	struct dc_link *link = stream->link;
-	struct link_encoder *link_enc = NULL;
+	struct link_encoder *link_enc = pipe_ctx->link_res.dio_link_enc;
 	struct dc *dc = pipe_ctx->stream->ctx->dc;
 	struct dce_hwseq *hws = dc->hwseq;
 
@@ -1230,7 +1230,8 @@ static void get_pixel_clock_parameters(
 
 	pixel_clk_params->requested_pix_clk_100hz = stream->timing.pix_clk_100hz;
 
-	link_enc = link_enc_cfg_get_link_enc(link);
+	if (!dc->config.unify_link_enc_assignment)
+		link_enc = link_enc_cfg_get_link_enc(link);
 	if (link_enc)
 		pixel_clk_params->encoder_object_id = link_enc->id;
 
@@ -1251,7 +1252,7 @@ static void get_pixel_clock_parameters(
 
 	if (opp_cnt == 4)
 		pixel_clk_params->requested_pix_clk_100hz /= 4;
-	else if (optc2_is_two_pixels_per_containter(&stream->timing) || opp_cnt == 2)
+	else if (pipe_ctx->stream_res.tg->funcs->is_two_pixels_per_container(&stream->timing) || opp_cnt == 2)
 		pixel_clk_params->requested_pix_clk_100hz /= 2;
 	else if (hws->funcs.is_dp_dig_pixel_rate_div_policy) {
 		if (hws->funcs.is_dp_dig_pixel_rate_div_policy(pipe_ctx))
@@ -1261,6 +1262,15 @@ static void get_pixel_clock_parameters(
 	if (stream->timing.timing_3d_format == TIMING_3D_FORMAT_HW_FRAME_PACKING)
 		pixel_clk_params->requested_pix_clk_100hz *= 2;
 
+	if ((pipe_ctx->stream_res.tg->funcs->is_two_pixels_per_container &&
+			pipe_ctx->stream_res.tg->funcs->is_two_pixels_per_container(&pipe_ctx->stream->timing)) ||
+			(hws->funcs.is_dp_dig_pixel_rate_div_policy &&
+			hws->funcs.is_dp_dig_pixel_rate_div_policy(pipe_ctx)) ||
+			opp_cnt > 1) {
+		pixel_clk_params->dio_se_pix_per_cycle = 2;
+	} else {
+		pixel_clk_params->dio_se_pix_per_cycle = 1;
+	}
 }
 
 static void build_clamping_params(struct dc_stream_state *stream)
@@ -1501,41 +1511,12 @@ bool dcn20_split_stream_for_odm(
 	next_odm_pipe->prev_odm_pipe = prev_odm_pipe;
 
 	if (prev_odm_pipe->plane_state) {
-		struct scaler_data *sd = &prev_odm_pipe->plane_res.scl_data;
-		int new_width;
-
-		/* HACTIVE halved for odm combine */
-		sd->h_active /= 2;
-		/* Calculate new vp and recout for left pipe */
-		/* Need at least 16 pixels width per side */
-		if (sd->recout.x + 16 >= sd->h_active)
-			return false;
-		new_width = sd->h_active - sd->recout.x;
-		sd->viewport.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->recout.width - new_width));
-		sd->viewport_c.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->recout.width - new_width));
-		sd->recout.width = new_width;
-
-		/* Calculate new vp and recout for right pipe */
-		sd = &next_odm_pipe->plane_res.scl_data;
-		/* HACTIVE halved for odm combine */
-		sd->h_active /= 2;
-		/* Need at least 16 pixels width per side */
-		if (new_width <= 16)
-			return false;
-		new_width = sd->recout.width + sd->recout.x - sd->h_active;
-		sd->viewport.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->recout.width - new_width));
-		sd->viewport_c.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->recout.width - new_width));
-		sd->recout.width = new_width;
-		sd->viewport.x += dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->h_active - sd->recout.x));
-		sd->viewport_c.x += dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->h_active - sd->recout.x));
-		sd->recout.x = 0;
+		if (!resource_build_scaling_params(prev_odm_pipe) ||
+			!resource_build_scaling_params(next_odm_pipe)) {
+				return false;
+		}
 	}
+
 	if (!next_odm_pipe->top_pipe)
 		next_odm_pipe->stream_res.opp = pool->opps[next_odm_pipe->pipe_idx];
 	else
@@ -1603,7 +1584,7 @@ unsigned int dcn20_calc_max_scaled_time(
 	if (time_per_byte == 0)
 		time_per_byte = 1;
 
-	small_free_entry  = (total_y_free_entry > total_c_free_entry) ? total_c_free_entry : total_y_free_entry;
+	small_free_entry  = total_c_free_entry;
 	max_free_entry    = (mode == PACKED_444) ? total_y_free_entry + total_c_free_entry : small_free_entry;
 	buf_lh_capability = max_free_entry*time_per_byte*32/16; /* there is 4bit fraction */
 	max_scaled_time   = buf_lh_capability - urgent_watermark;
@@ -1657,8 +1638,6 @@ void dcn20_set_mcif_arb_params(
 			if (dwb_pipe >= MAX_DWB_PIPES)
 				return;
 		}
-		if (dwb_pipe >= MAX_DWB_PIPES)
-			return;
 	}
 }
 
@@ -1690,6 +1669,7 @@ bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 		dsc_cfg.is_odm = pipe_ctx->next_odm_pipe ? true : false;
 		dsc_cfg.dc_dsc_cfg = stream->timing.dsc_cfg;
 		dsc_cfg.dc_dsc_cfg.num_slices_h /= opp_cnt;
+		dsc_cfg.dsc_padding = pipe_ctx->dsc_padding_params.dsc_hactive_padding;
 
 		if (!pipe_ctx->stream_res.dsc->funcs->dsc_validate_stream(pipe_ctx->stream_res.dsc, &dsc_cfg))
 			return false;
@@ -2029,10 +2009,11 @@ bool dcn20_fast_validate_bw(
 		int *pipe_cnt_out,
 		int *pipe_split_from,
 		int *vlevel_out,
-		bool fast_validate)
+		enum dc_validate_mode validate_mode)
 {
 	bool out = false;
 	int split[MAX_PIPES] = { 0 };
+	bool merge[MAX_PIPES] = { false };
 	int pipe_cnt, i, pipe_idx, vlevel;
 
 	ASSERT(pipes);
@@ -2042,7 +2023,7 @@ bool dcn20_fast_validate_bw(
 	dcn20_merge_pipes_for_validate(dc, context);
 
 	DC_FP_START();
-	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, fast_validate);
+	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, validate_mode);
 	DC_FP_END();
 
 	*pipe_cnt_out = pipe_cnt;
@@ -2057,7 +2038,7 @@ bool dcn20_fast_validate_bw(
 	if (vlevel > context->bw_ctx.dml.soc.num_states)
 		goto validate_fail;
 
-	vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, split, NULL);
+	vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, split, merge);
 
 	/*initialize pipe_just_split_from to invalid idx*/
 	for (i = 0; i < MAX_PIPES; i++)
@@ -2125,6 +2106,7 @@ bool dcn20_fast_validate_bw(
 			ASSERT(0);
 		}
 	}
+
 	/* Actual dsc count per stream dsc validation*/
 	if (!dcn20_validate_dsc(dc, context)) {
 		context->bw_ctx.dml.vba.ValidationStatus[context->bw_ctx.dml.vba.soc.num_states] =
@@ -2144,22 +2126,22 @@ validate_out:
 	return out;
 }
 
-bool dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
-		bool fast_validate)
+enum dc_status dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
+		enum dc_validate_mode validate_mode)
 {
 	bool voltage_supported;
 	display_e2e_pipe_params_st *pipes;
 
 	pipes = kcalloc(dc->res_pool->pipe_count, sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
 	if (!pipes)
-		return false;
+		return DC_FAIL_BANDWIDTH_VALIDATE;
 
 	DC_FP_START();
-	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, fast_validate, pipes);
+	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, validate_mode, pipes);
 	DC_FP_END();
 
 	kfree(pipes);
-	return voltage_supported;
+	return voltage_supported ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 }
 
 struct pipe_ctx *dcn20_acquire_free_pipe_for_layer(
@@ -2193,10 +2175,11 @@ bool dcn20_get_dcc_compression_cap(const struct dc *dc,
 		const struct dc_dcc_surface_param *input,
 		struct dc_surface_dcc_cap *output)
 {
-	return dc->res_pool->hubbub->funcs->get_dcc_compression_cap(
-			dc->res_pool->hubbub,
-			input,
-			output);
+	if (dc->res_pool->hubbub->funcs->get_dcc_compression_cap)
+		return dc->res_pool->hubbub->funcs->get_dcc_compression_cap(
+			dc->res_pool->hubbub, input, output);
+
+	return false;
 }
 
 static void dcn20_destroy_resource_pool(struct resource_pool **pool)
@@ -2249,7 +2232,8 @@ static const struct resource_funcs dcn20_res_pool_funcs = {
 	.patch_unknown_plane_state = dcn20_patch_unknown_plane_state,
 	.set_mcif_arb_params = dcn20_set_mcif_arb_params,
 	.populate_dml_pipes = dcn20_populate_dml_pipes_from_context,
-	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link
+	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe
 };
 
 bool dcn20_dwbc_create(struct dc_context *ctx, struct resource_pool *pool)
@@ -2304,7 +2288,7 @@ bool dcn20_mmhubbub_create(struct dc_context *ctx, struct resource_pool *pool)
 
 static struct pp_smu_funcs *dcn20_pp_smu_create(struct dc_context *ctx)
 {
-	struct pp_smu_funcs *pp_smu = kzalloc(sizeof(*pp_smu), GFP_ATOMIC);
+	struct pp_smu_funcs *pp_smu = kzalloc(sizeof(*pp_smu), GFP_KERNEL);
 
 	if (!pp_smu)
 		return pp_smu;
@@ -2340,7 +2324,6 @@ static struct _vcs_dpi_soc_bounding_box_st *get_asic_rev_soc_bb(
 static struct _vcs_dpi_ip_params_st *get_asic_rev_ip_params(
 	uint32_t hw_internal_rev)
 {
-	/* NV14 */
 	if (ASICREV_IS_NAVI14_M(hw_internal_rev))
 		return &dcn2_0_nv14_ip;
 
@@ -2491,6 +2474,7 @@ static bool dcn20_resource_construct(
 	dc->caps.color.mpc.ocsc = 1;
 
 	dc->caps.dp_hdmi21_pcon_support = true;
+	dc->check_config = config_defaults;
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
@@ -2622,7 +2606,7 @@ static bool dcn20_resource_construct(
 		ranges.writer_wm_sets[0].max_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
 
 		/* Notify PP Lib/SMU which Watermarks to use for which clock ranges */
-		if (pool->base.pp_smu->nv_funcs.set_wm_ranges)
+		if (pool->base.pp_smu && pool->base.pp_smu->nv_funcs.set_wm_ranges)
 			pool->base.pp_smu->nv_funcs.set_wm_ranges(&pool->base.pp_smu->nv_funcs.pp_smu, &ranges);
 	}
 
@@ -2755,6 +2739,8 @@ static bool dcn20_resource_construct(
 	for (i = 0; i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
 
+	dc->caps.max_odm_combine_factor = 2;
+
 	dc->cap_funcs = cap_funcs;
 
 	if (dc->ctx->dc_bios->fw_info.oem_i2c_present) {
@@ -2782,7 +2768,7 @@ struct resource_pool *dcn20_create_resource_pool(
 		struct dc *dc)
 {
 	struct dcn20_resource_pool *pool =
-		kzalloc(sizeof(struct dcn20_resource_pool), GFP_ATOMIC);
+		kzalloc(sizeof(struct dcn20_resource_pool), GFP_KERNEL);
 
 	if (!pool)
 		return NULL;

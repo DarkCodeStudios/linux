@@ -28,6 +28,9 @@ enum riscv_regset {
 #ifdef CONFIG_RISCV_ISA_V
 	REGSET_V,
 #endif
+#ifdef CONFIG_RISCV_ISA_SUPM
+	REGSET_TAGGED_ADDR_CTRL,
+#endif
 };
 
 static int riscv_gpr_get(struct task_struct *target,
@@ -150,11 +153,51 @@ static int riscv_vr_set(struct task_struct *target,
 				 0, riscv_v_vsize);
 	return ret;
 }
+
+static int riscv_vr_active(struct task_struct *target, const struct user_regset *regset)
+{
+	if (!(has_vector() || has_xtheadvector()))
+		return -ENODEV;
+
+	if (!riscv_v_vstate_query(task_pt_regs(target)))
+		return 0;
+
+	return regset->n;
+}
 #endif
 
-static const struct user_regset riscv_user_regset[] = {
+#ifdef CONFIG_RISCV_ISA_SUPM
+static int tagged_addr_ctrl_get(struct task_struct *target,
+				const struct user_regset *regset,
+				struct membuf to)
+{
+	long ctrl = get_tagged_addr_ctrl(target);
+
+	if (IS_ERR_VALUE(ctrl))
+		return ctrl;
+
+	return membuf_write(&to, &ctrl, sizeof(ctrl));
+}
+
+static int tagged_addr_ctrl_set(struct task_struct *target,
+				const struct user_regset *regset,
+				unsigned int pos, unsigned int count,
+				const void *kbuf, const void __user *ubuf)
+{
+	int ret;
+	long ctrl;
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &ctrl, 0, -1);
+	if (ret)
+		return ret;
+
+	return set_tagged_addr_ctrl(target, ctrl);
+}
+#endif
+
+static struct user_regset riscv_user_regset[] __ro_after_init = {
 	[REGSET_X] = {
-		.core_note_type = NT_PRSTATUS,
+		USER_REGSET_NOTE_TYPE(PRSTATUS),
 		.n = ELF_NGREG,
 		.size = sizeof(elf_greg_t),
 		.align = sizeof(elf_greg_t),
@@ -163,7 +206,7 @@ static const struct user_regset riscv_user_regset[] = {
 	},
 #ifdef CONFIG_FPU
 	[REGSET_F] = {
-		.core_note_type = NT_PRFPREG,
+		USER_REGSET_NOTE_TYPE(PRFPREG),
 		.n = ELF_NFPREG,
 		.size = sizeof(elf_fpreg_t),
 		.align = sizeof(elf_fpreg_t),
@@ -173,13 +216,22 @@ static const struct user_regset riscv_user_regset[] = {
 #endif
 #ifdef CONFIG_RISCV_ISA_V
 	[REGSET_V] = {
-		.core_note_type = NT_RISCV_VECTOR,
+		USER_REGSET_NOTE_TYPE(RISCV_VECTOR),
 		.align = 16,
-		.n = ((32 * RISCV_MAX_VLENB) +
-		      sizeof(struct __riscv_v_regset_state)) / sizeof(__u32),
 		.size = sizeof(__u32),
 		.regset_get = riscv_vr_get,
 		.set = riscv_vr_set,
+		.active = riscv_vr_active,
+	},
+#endif
+#ifdef CONFIG_RISCV_ISA_SUPM
+	[REGSET_TAGGED_ADDR_CTRL] = {
+		USER_REGSET_NOTE_TYPE(RISCV_TAGGED_ADDR_CTRL),
+		.n = 1,
+		.size = sizeof(long),
+		.align = sizeof(long),
+		.regset_get = tagged_addr_ctrl_get,
+		.set = tagged_addr_ctrl_set,
 	},
 #endif
 };
@@ -190,6 +242,14 @@ static const struct user_regset_view riscv_user_native_view = {
 	.regsets = riscv_user_regset,
 	.n = ARRAY_SIZE(riscv_user_regset),
 };
+
+#ifdef CONFIG_RISCV_ISA_V
+void __init update_regset_vector_info(unsigned long size)
+{
+	riscv_user_regset[REGSET_V].n = (size + sizeof(struct __riscv_v_regset_state)) /
+					sizeof(__u32);
+}
+#endif
 
 struct pt_regs_offset {
 	const char *name;
@@ -338,7 +398,7 @@ static int compat_riscv_gpr_set(struct task_struct *target,
 
 static const struct user_regset compat_riscv_user_regset[] = {
 	[REGSET_X] = {
-		.core_note_type = NT_PRSTATUS,
+		USER_REGSET_NOTE_TYPE(PRSTATUS),
 		.n = ELF_NGREG,
 		.size = sizeof(compat_elf_greg_t),
 		.align = sizeof(compat_elf_greg_t),
@@ -347,7 +407,7 @@ static const struct user_regset compat_riscv_user_regset[] = {
 	},
 #ifdef CONFIG_FPU
 	[REGSET_F] = {
-		.core_note_type = NT_PRFPREG,
+		USER_REGSET_NOTE_TYPE(PRFPREG),
 		.n = ELF_NFPREG,
 		.size = sizeof(elf_fpreg_t),
 		.align = sizeof(elf_fpreg_t),

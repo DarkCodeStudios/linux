@@ -37,7 +37,7 @@ void ccu_helper_wait_for_lock(struct ccu_common *common, u32 lock)
 
 	WARN_ON(readl_relaxed_poll_timeout(addr, reg, reg & lock, 100, 70000));
 }
-EXPORT_SYMBOL_NS_GPL(ccu_helper_wait_for_lock, SUNXI_CCU);
+EXPORT_SYMBOL_NS_GPL(ccu_helper_wait_for_lock, "SUNXI_CCU");
 
 bool ccu_is_better_rate(struct ccu_common *common,
 			unsigned long target_rate,
@@ -59,14 +59,14 @@ bool ccu_is_better_rate(struct ccu_common *common,
 
 	return current_rate <= target_rate && current_rate > best_rate;
 }
-EXPORT_SYMBOL_NS_GPL(ccu_is_better_rate, SUNXI_CCU);
+EXPORT_SYMBOL_NS_GPL(ccu_is_better_rate, "SUNXI_CCU");
 
 /*
  * This clock notifier is called when the frequency of a PLL clock is
  * changed. In common PLL designs, changes to the dividers take effect
  * almost immediately, while changes to the multipliers (implemented
  * as dividers in the feedback loop) take a few cycles to work into
- * the feedback loop for the PLL to stablize.
+ * the feedback loop for the PLL to stabilize.
  *
  * Sometimes when the PLL clock rate is changed, the decrease in the
  * divider is too much for the decrease in the multiplier to catch up.
@@ -107,7 +107,7 @@ int ccu_pll_notifier_register(struct ccu_pll_nb *pll_nb)
 	return clk_notifier_register(pll_nb->common->hw.clk,
 				     &pll_nb->clk_nb);
 }
-EXPORT_SYMBOL_NS_GPL(ccu_pll_notifier_register, SUNXI_CCU);
+EXPORT_SYMBOL_NS_GPL(ccu_pll_notifier_register, "SUNXI_CCU");
 
 static int sunxi_ccu_probe(struct sunxi_ccu *ccu, struct device *dev,
 			   struct device_node *node, void __iomem *reg,
@@ -132,7 +132,6 @@ static int sunxi_ccu_probe(struct sunxi_ccu *ccu, struct device *dev,
 
 	for (i = 0; i < desc->hw_clks->num ; i++) {
 		struct clk_hw *hw = desc->hw_clks->hws[i];
-		struct ccu_common *common = hw_to_ccu_common(hw);
 		const char *name;
 
 		if (!hw)
@@ -147,14 +146,21 @@ static int sunxi_ccu_probe(struct sunxi_ccu *ccu, struct device *dev,
 			pr_err("Couldn't register clock %d - %s\n", i, name);
 			goto err_clk_unreg;
 		}
+	}
 
-		if (common->max_rate)
-			clk_hw_set_rate_range(hw, common->min_rate,
-					      common->max_rate);
+	for (i = 0; i < desc->num_ccu_clks; i++) {
+		struct ccu_common *cclk = desc->ccu_clks[i];
+
+		if (!cclk)
+			continue;
+
+		if (cclk->max_rate)
+			clk_hw_set_rate_range(&cclk->hw, cclk->min_rate,
+					      cclk->max_rate);
 		else
-			WARN(common->min_rate,
+			WARN(cclk->min_rate,
 			     "No max_rate, ignoring min_rate of clock %d - %s\n",
-			     i, name);
+			     i, clk_hw_get_name(&cclk->hw));
 	}
 
 	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get,
@@ -228,7 +234,7 @@ int devm_sunxi_ccu_probe(struct device *dev, void __iomem *reg,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(devm_sunxi_ccu_probe, SUNXI_CCU);
+EXPORT_SYMBOL_NS_GPL(devm_sunxi_ccu_probe, "SUNXI_CCU");
 
 void of_sunxi_ccu_probe(struct device_node *node, void __iomem *reg,
 			const struct sunxi_ccu_desc *desc)
@@ -247,4 +253,5 @@ void of_sunxi_ccu_probe(struct device_node *node, void __iomem *reg,
 	}
 }
 
+MODULE_DESCRIPTION("Common clock support for Allwinner SoCs");
 MODULE_LICENSE("GPL");

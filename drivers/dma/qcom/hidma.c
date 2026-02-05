@@ -948,7 +948,7 @@ MODULE_DEVICE_TABLE(acpi, hidma_acpi_ids);
 
 static struct platform_driver hidma_driver = {
 	.probe = hidma_probe,
-	.remove_new = hidma_remove,
+	.remove = hidma_remove,
 	.shutdown = hidma_shutdown,
 	.driver = {
 		   .name = "hidma",
@@ -957,4 +957,5 @@ static struct platform_driver hidma_driver = {
 };
 
 module_platform_driver(hidma_driver);
+MODULE_DESCRIPTION("Qualcomm Technologies HIDMA Channel support");
 MODULE_LICENSE("GPL v2");

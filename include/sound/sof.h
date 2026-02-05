@@ -106,6 +106,7 @@ struct snd_sof_pdata {
 	const char *fw_filename;
 	const char *tplg_filename_prefix;
 	const char *tplg_filename;
+	bool disable_function_topology;
 
 	/* loadable external libraries available under this directory */
 	const char *fw_lib_prefix;
@@ -173,5 +174,6 @@ struct sof_dev_desc {
 
 int sof_dai_get_mclk(struct snd_soc_pcm_runtime *rtd);
 int sof_dai_get_bclk(struct snd_soc_pcm_runtime *rtd);
+int sof_dai_get_tdm_slots(struct snd_soc_pcm_runtime *rtd);
 
 #endif

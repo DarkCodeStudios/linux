@@ -1186,10 +1186,10 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_cyclic(
 	d->dev_addr = dev_addr;
 	d->fi = burst;
 	d->es = es;
+	d->sglen = 1;
 	d->sg[0].addr = buf_addr;
 	d->sg[0].en = period_len / es_bytes[es];
 	d->sg[0].fn = buf_len / period_len;
-	d->sglen = 1;
 
 	d->ccr = c->ccr;
 	if (dir == DMA_DEV_TO_MEM)
@@ -1258,10 +1258,10 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_memcpy(
 	d->dev_addr = src;
 	d->fi = 0;
 	d->es = data_type;
+	d->sglen = 1;
 	d->sg[0].en = len / BIT(data_type);
 	d->sg[0].fn = 1;
 	d->sg[0].addr = dest;
-	d->sglen = 1;
 	d->ccr = c->ccr;
 	d->ccr |= CCR_DST_AMODE_POSTINC | CCR_SRC_AMODE_POSTINC;
 
@@ -1309,6 +1309,7 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_interleaved(
 	if (data_type > CSDP_DATA_TYPE_32)
 		data_type = CSDP_DATA_TYPE_32;
 
+	d->sglen = 1;
 	sg = &d->sg[0];
 	d->dir = DMA_MEM_TO_MEM;
 	d->dev_addr = xt->src_start;
@@ -1316,7 +1317,6 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_interleaved(
 	sg->en = xt->sgl[0].size / BIT(data_type);
 	sg->fn = xt->numf;
 	sg->addr = xt->dst_start;
-	d->sglen = 1;
 	d->ccr = c->ccr;
 
 	src_icg = dmaengine_get_src_icg(xt, &xt->sgl[0]);
@@ -1808,6 +1808,8 @@ static int omap_dma_probe(struct platform_device *pdev)
 	if (rc) {
 		pr_warn("OMAP-DMA: failed to register slave DMA engine device: %d\n",
 			rc);
+		if (od->ll123_supported)
+			dma_pool_destroy(od->desc_pool);
 		omap_dma_free(od);
 		return rc;
 	}
@@ -1823,6 +1825,8 @@ static int omap_dma_probe(struct platform_device *pdev)
 		if (rc) {
 			pr_warn("OMAP-DMA: failed to register DMA controller\n");
 			dma_async_device_unregister(&od->ddev);
+			if (od->ll123_supported)
+				dma_pool_destroy(od->desc_pool);
 			omap_dma_free(od);
 		}
 	}
@@ -1915,7 +1919,7 @@ MODULE_DEVICE_TABLE(of, omap_dma_match);
 
 static struct platform_driver omap_dma_driver = {
 	.probe	= omap_dma_probe,
-	.remove_new = omap_dma_remove,
+	.remove = omap_dma_remove,
 	.driver = {
 		.name = "omap-dma-engine",
 		.of_match_table = omap_dma_match,
@@ -1950,4 +1954,5 @@ static void __exit omap_dma_exit(void)
 module_exit(omap_dma_exit);
 
 MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("Texas Instruments sDMA DMAengine support");
 MODULE_LICENSE("GPL");

@@ -14,166 +14,11 @@
 #include <asm/access-regs.h>
 #include <asm/fault.h>
 #include <asm/gmap.h>
+#include <asm/dat-bits.h>
 #include "kvm-s390.h"
 #include "gaccess.h"
 
-union asce {
-	unsigned long val;
-	struct {
-		unsigned long origin : 52; /* Region- or Segment-Table Origin */
-		unsigned long	 : 2;
-		unsigned long g  : 1; /* Subspace Group Control */
-		unsigned long p  : 1; /* Private Space Control */
-		unsigned long s  : 1; /* Storage-Alteration-Event Control */
-		unsigned long x  : 1; /* Space-Switch-Event Control */
-		unsigned long r  : 1; /* Real-Space Control */
-		unsigned long	 : 1;
-		unsigned long dt : 2; /* Designation-Type Control */
-		unsigned long tl : 2; /* Region- or Segment-Table Length */
-	};
-};
-
-enum {
-	ASCE_TYPE_SEGMENT = 0,
-	ASCE_TYPE_REGION3 = 1,
-	ASCE_TYPE_REGION2 = 2,
-	ASCE_TYPE_REGION1 = 3
-};
-
-union region1_table_entry {
-	unsigned long val;
-	struct {
-		unsigned long rto: 52;/* Region-Table Origin */
-		unsigned long	 : 2;
-		unsigned long p  : 1; /* DAT-Protection Bit */
-		unsigned long	 : 1;
-		unsigned long tf : 2; /* Region-Second-Table Offset */
-		unsigned long i  : 1; /* Region-Invalid Bit */
-		unsigned long	 : 1;
-		unsigned long tt : 2; /* Table-Type Bits */
-		unsigned long tl : 2; /* Region-Second-Table Length */
-	};
-};
-
-union region2_table_entry {
-	unsigned long val;
-	struct {
-		unsigned long rto: 52;/* Region-Table Origin */
-		unsigned long	 : 2;
-		unsigned long p  : 1; /* DAT-Protection Bit */
-		unsigned long	 : 1;
-		unsigned long tf : 2; /* Region-Third-Table Offset */
-		unsigned long i  : 1; /* Region-Invalid Bit */
-		unsigned long	 : 1;
-		unsigned long tt : 2; /* Table-Type Bits */
-		unsigned long tl : 2; /* Region-Third-Table Length */
-	};
-};
-
-struct region3_table_entry_fc0 {
-	unsigned long sto: 52;/* Segment-Table Origin */
-	unsigned long	 : 1;
-	unsigned long fc : 1; /* Format-Control */
-	unsigned long p  : 1; /* DAT-Protection Bit */
-	unsigned long	 : 1;
-	unsigned long tf : 2; /* Segment-Table Offset */
-	unsigned long i  : 1; /* Region-Invalid Bit */
-	unsigned long cr : 1; /* Common-Region Bit */
-	unsigned long tt : 2; /* Table-Type Bits */
-	unsigned long tl : 2; /* Segment-Table Length */
-};
-
-struct region3_table_entry_fc1 {
-	unsigned long rfaa : 33; /* Region-Frame Absolute Address */
-	unsigned long	 : 14;
-	unsigned long av : 1; /* ACCF-Validity Control */
-	unsigned long acc: 4; /* Access-Control Bits */
-	unsigned long f  : 1; /* Fetch-Protection Bit */
-	unsigned long fc : 1; /* Format-Control */
-	unsigned long p  : 1; /* DAT-Protection Bit */
-	unsigned long iep: 1; /* Instruction-Execution-Protection */
-	unsigned long	 : 2;
-	unsigned long i  : 1; /* Region-Invalid Bit */
-	unsigned long cr : 1; /* Common-Region Bit */
-	unsigned long tt : 2; /* Table-Type Bits */
-	unsigned long	 : 2;
-};
-
-union region3_table_entry {
-	unsigned long val;
-	struct region3_table_entry_fc0 fc0;
-	struct region3_table_entry_fc1 fc1;
-	struct {
-		unsigned long	 : 53;
-		unsigned long fc : 1; /* Format-Control */
-		unsigned long	 : 4;
-		unsigned long i  : 1; /* Region-Invalid Bit */
-		unsigned long cr : 1; /* Common-Region Bit */
-		unsigned long tt : 2; /* Table-Type Bits */
-		unsigned long	 : 2;
-	};
-};
-
-struct segment_entry_fc0 {
-	unsigned long pto: 53;/* Page-Table Origin */
-	unsigned long fc : 1; /* Format-Control */
-	unsigned long p  : 1; /* DAT-Protection Bit */
-	unsigned long	 : 3;
-	unsigned long i  : 1; /* Segment-Invalid Bit */
-	unsigned long cs : 1; /* Common-Segment Bit */
-	unsigned long tt : 2; /* Table-Type Bits */
-	unsigned long	 : 2;
-};
-
-struct segment_entry_fc1 {
-	unsigned long sfaa : 44; /* Segment-Frame Absolute Address */
-	unsigned long	 : 3;
-	unsigned long av : 1; /* ACCF-Validity Control */
-	unsigned long acc: 4; /* Access-Control Bits */
-	unsigned long f  : 1; /* Fetch-Protection Bit */
-	unsigned long fc : 1; /* Format-Control */
-	unsigned long p  : 1; /* DAT-Protection Bit */
-	unsigned long iep: 1; /* Instruction-Execution-Protection */
-	unsigned long	 : 2;
-	unsigned long i  : 1; /* Segment-Invalid Bit */
-	unsigned long cs : 1; /* Common-Segment Bit */
-	unsigned long tt : 2; /* Table-Type Bits */
-	unsigned long	 : 2;
-};
-
-union segment_table_entry {
-	unsigned long val;
-	struct segment_entry_fc0 fc0;
-	struct segment_entry_fc1 fc1;
-	struct {
-		unsigned long	 : 53;
-		unsigned long fc : 1; /* Format-Control */
-		unsigned long	 : 4;
-		unsigned long i  : 1; /* Segment-Invalid Bit */
-		unsigned long cs : 1; /* Common-Segment Bit */
-		unsigned long tt : 2; /* Table-Type Bits */
-		unsigned long	 : 2;
-	};
-};
-
-enum {
-	TABLE_TYPE_SEGMENT = 0,
-	TABLE_TYPE_REGION3 = 1,
-	TABLE_TYPE_REGION2 = 2,
-	TABLE_TYPE_REGION1 = 3
-};
-
-union page_table_entry {
-	unsigned long val;
-	struct {
-		unsigned long pfra : 52; /* Page-Frame Real Address */
-		unsigned long z  : 1; /* Zero Bit */
-		unsigned long i  : 1; /* Page-Invalid Bit */
-		unsigned long p  : 1; /* DAT-Protection Bit */
-		unsigned long iep: 1; /* Instruction-Execution-Protection */
-		unsigned long	 : 8;
-	};
-};
+#define GMAP_SHADOW_FAKE_TABLE 1ULL
 
 /*
  * vaddress union in order to easily decode a virtual address into its
@@ -264,14 +109,9 @@ struct aste {
 
 int ipte_lock_held(struct kvm *kvm)
 {
-	if (sclp.has_siif) {
-		int rc;
+	if (sclp.has_siif)
+		return kvm->arch.sca->ipte_control.kh != 0;
 
-		read_lock(&kvm->arch.sca_lock);
-		rc = kvm_s390_get_ipte_control(kvm)->kh != 0;
-		read_unlock(&kvm->arch.sca_lock);
-		return rc;
-	}
 	return kvm->arch.ipte_lock_count != 0;
 }
 
@@ -284,19 +124,16 @@ static void ipte_lock_simple(struct kvm *kvm)
 	if (kvm->arch.ipte_lock_count > 1)
 		goto out;
 retry:
-	read_lock(&kvm->arch.sca_lock);
-	ic = kvm_s390_get_ipte_control(kvm);
+	ic = &kvm->arch.sca->ipte_control;
+	old = READ_ONCE(*ic);
 	do {
-		old = READ_ONCE(*ic);
 		if (old.k) {
-			read_unlock(&kvm->arch.sca_lock);
 			cond_resched();
 			goto retry;
 		}
 		new = old;
 		new.k = 1;
-	} while (cmpxchg(&ic->val, old.val, new.val) != old.val);
-	read_unlock(&kvm->arch.sca_lock);
+	} while (!try_cmpxchg(&ic->val, &old.val, new.val));
 out:
 	mutex_unlock(&kvm->arch.ipte_mutex);
 }
@@ -309,14 +146,12 @@ static void ipte_unlock_simple(struct kvm *kvm)
 	kvm->arch.ipte_lock_count--;
 	if (kvm->arch.ipte_lock_count)
 		goto out;
-	read_lock(&kvm->arch.sca_lock);
-	ic = kvm_s390_get_ipte_control(kvm);
+	ic = &kvm->arch.sca->ipte_control;
+	old = READ_ONCE(*ic);
 	do {
-		old = READ_ONCE(*ic);
 		new = old;
 		new.k = 0;
-	} while (cmpxchg(&ic->val, old.val, new.val) != old.val);
-	read_unlock(&kvm->arch.sca_lock);
+	} while (!try_cmpxchg(&ic->val, &old.val, new.val));
 	wake_up(&kvm->arch.ipte_wq);
 out:
 	mutex_unlock(&kvm->arch.ipte_mutex);
@@ -327,36 +162,31 @@ static void ipte_lock_siif(struct kvm *kvm)
 	union ipte_control old, new, *ic;
 
 retry:
-	read_lock(&kvm->arch.sca_lock);
-	ic = kvm_s390_get_ipte_control(kvm);
+	ic = &kvm->arch.sca->ipte_control;
+	old = READ_ONCE(*ic);
 	do {
-		old = READ_ONCE(*ic);
 		if (old.kg) {
-			read_unlock(&kvm->arch.sca_lock);
 			cond_resched();
 			goto retry;
 		}
 		new = old;
 		new.k = 1;
 		new.kh++;
-	} while (cmpxchg(&ic->val, old.val, new.val) != old.val);
-	read_unlock(&kvm->arch.sca_lock);
+	} while (!try_cmpxchg(&ic->val, &old.val, new.val));
 }
 
 static void ipte_unlock_siif(struct kvm *kvm)
 {
 	union ipte_control old, new, *ic;
 
-	read_lock(&kvm->arch.sca_lock);
-	ic = kvm_s390_get_ipte_control(kvm);
+	ic = &kvm->arch.sca->ipte_control;
+	old = READ_ONCE(*ic);
 	do {
-		old = READ_ONCE(*ic);
 		new = old;
 		new.kh--;
 		if (!new.kh)
 			new.k = 0;
-	} while (cmpxchg(&ic->val, old.val, new.val) != old.val);
-	read_unlock(&kvm->arch.sca_lock);
+	} while (!try_cmpxchg(&ic->val, &old.val, new.val));
 	if (!new.kh)
 		wake_up(&kvm->arch.ipte_wq);
 }
@@ -474,7 +304,7 @@ enum prot_type {
 	PROT_TYPE_DAT  = 3,
 	PROT_TYPE_IEP  = 4,
 	/* Dummy value for passing an initialized value when code != PGM_PROTECTION */
-	PROT_NONE,
+	PROT_TYPE_DUMMY,
 };
 
 static int trans_exc_ending(struct kvm_vcpu *vcpu, int code, unsigned long gva, u8 ar,
@@ -490,7 +320,7 @@ static int trans_exc_ending(struct kvm_vcpu *vcpu, int code, unsigned long gva, 
 	switch (code) {
 	case PGM_PROTECTION:
 		switch (prot) {
-		case PROT_NONE:
+		case PROT_TYPE_DUMMY:
 			/* We should never get here, acts like termination */
 			WARN_ON_ONCE(1);
 			break;
@@ -632,7 +462,7 @@ static unsigned long guest_translate(struct kvm_vcpu *vcpu, unsigned long gva,
 	iep = ctlreg0.iep && test_kvm_facility(vcpu->kvm, 130);
 	if (asce.r)
 		goto real_address;
-	ptr = asce.origin * PAGE_SIZE;
+	ptr = asce.rsto * PAGE_SIZE;
 	switch (asce.dt) {
 	case ASCE_TYPE_REGION1:
 		if (vaddr.rfx01 > asce.tl)
@@ -960,7 +790,7 @@ static int guest_range_to_gpas(struct kvm_vcpu *vcpu, unsigned long ga, u8 ar,
 			gpa = kvm_s390_real_to_abs(vcpu, ga);
 			if (!kvm_is_gpa_in_memslot(vcpu->kvm, gpa)) {
 				rc = PGM_ADDRESSING;
-				prot = PROT_NONE;
+				prot = PROT_TYPE_DUMMY;
 			}
 		}
 		if (rc)
@@ -985,6 +815,8 @@ static int access_guest_page(struct kvm *kvm, enum gacc_mode mode, gpa_t gpa,
 	const gfn_t gfn = gpa_to_gfn(gpa);
 	int rc;
 
+	if (!gfn_to_memslot(kvm, gfn))
+		return PGM_ADDRESSING;
 	if (mode == GACC_STORE)
 		rc = kvm_write_guest_page(kvm, gfn, data, offset, len);
 	else
@@ -1116,7 +948,7 @@ int access_guest_with_key(struct kvm_vcpu *vcpu, unsigned long ga, u8 ar,
 		if (rc == PGM_PROTECTION)
 			prot = PROT_TYPE_KEYC;
 		else
-			prot = PROT_NONE;
+			prot = PROT_TYPE_DUMMY;
 		rc = trans_exc_ending(vcpu, rc, ga, ar, mode, prot, terminate);
 	}
 out_unlock:
@@ -1142,6 +974,8 @@ int access_guest_real(struct kvm_vcpu *vcpu, unsigned long gra,
 		gra += fragment_len;
 		data += fragment_len;
 	}
+	if (rc > 0)
+		vcpu->arch.pgm.code = rc;
 	return rc;
 }
 
@@ -1379,7 +1213,7 @@ static int kvm_s390_shadow_tables(struct gmap *sg, unsigned long saddr,
 	parent = sg->parent;
 	vaddr.addr = saddr;
 	asce.val = sg->orig_asce;
-	ptr = asce.origin * PAGE_SIZE;
+	ptr = asce.rsto * PAGE_SIZE;
 	if (asce.r) {
 		*fake = 1;
 		ptr = 0;
@@ -1546,6 +1380,44 @@ shadow_pgt:
 }
 
 /**
+ * shadow_pgt_lookup() - find a shadow page table
+ * @sg: pointer to the shadow guest address space structure
+ * @saddr: the address in the shadow aguest address space
+ * @pgt: parent gmap address of the page table to get shadowed
+ * @dat_protection: if the pgtable is marked as protected by dat
+ * @fake: pgt references contiguous guest memory block, not a pgtable
+ *
+ * Returns 0 if the shadow page table was found and -EAGAIN if the page
+ * table was not found.
+ *
+ * Called with sg->mm->mmap_lock in read.
+ */
+static int shadow_pgt_lookup(struct gmap *sg, unsigned long saddr, unsigned long *pgt,
+			     int *dat_protection, int *fake)
+{
+	unsigned long pt_index;
+	unsigned long *table;
+	struct page *page;
+	int rc;
+
+	spin_lock(&sg->guest_table_lock);
+	table = gmap_table_walk(sg, saddr, 1); /* get segment pointer */
+	if (table && !(*table & _SEGMENT_ENTRY_INVALID)) {
+		/* Shadow page tables are full pages (pte+pgste) */
+		page = pfn_to_page(*table >> PAGE_SHIFT);
+		pt_index = gmap_pgste_get_pgt_addr(page_to_virt(page));
+		*pgt = pt_index & ~GMAP_SHADOW_FAKE_TABLE;
+		*dat_protection = !!(*table & _SEGMENT_ENTRY_PROTECT);
+		*fake = !!(pt_index & GMAP_SHADOW_FAKE_TABLE);
+		rc = 0;
+	} else  {
+		rc = -EAGAIN;
+	}
+	spin_unlock(&sg->guest_table_lock);
+	return rc;
+}
+
+/**
  * kvm_s390_shadow_fault - handle fault on a shadow page table
  * @vcpu: virtual cpu
  * @sg: pointer to the shadow guest address space structure
@@ -1568,6 +1440,9 @@ int kvm_s390_shadow_fault(struct kvm_vcpu *vcpu, struct gmap *sg,
 	int dat_protection, fake;
 	int rc;
 
+	if (KVM_BUG_ON(!gmap_is_shadow(sg), vcpu->kvm))
+		return -EFAULT;
+
 	mmap_read_lock(sg->mm);
 	/*
 	 * We don't want any guest-2 tables to change - so the parent
@@ -1576,7 +1451,7 @@ int kvm_s390_shadow_fault(struct kvm_vcpu *vcpu, struct gmap *sg,
 	 */
 	ipte_lock(vcpu->kvm);
 
-	rc = gmap_shadow_pgt_lookup(sg, saddr, &pgt, &dat_protection, &fake);
+	rc = shadow_pgt_lookup(sg, saddr, &pgt, &dat_protection, &fake);
 	if (rc)
 		rc = kvm_s390_shadow_tables(sg, saddr, &pgt, &dat_protection,
 					    &fake);

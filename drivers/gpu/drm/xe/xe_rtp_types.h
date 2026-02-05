@@ -10,6 +10,7 @@
 
 #include "regs/xe_reg_defs.h"
 
+struct xe_device;
 struct xe_hw_engine;
 struct xe_gt;
 
@@ -42,15 +43,18 @@ enum {
 	XE_RTP_MATCH_SUBPLATFORM,
 	XE_RTP_MATCH_GRAPHICS_VERSION,
 	XE_RTP_MATCH_GRAPHICS_VERSION_RANGE,
+	XE_RTP_MATCH_GRAPHICS_VERSION_ANY_GT,
 	XE_RTP_MATCH_GRAPHICS_STEP,
 	XE_RTP_MATCH_MEDIA_VERSION,
 	XE_RTP_MATCH_MEDIA_VERSION_RANGE,
+	XE_RTP_MATCH_MEDIA_VERSION_ANY_GT,
 	XE_RTP_MATCH_MEDIA_STEP,
 	XE_RTP_MATCH_INTEGRATED,
 	XE_RTP_MATCH_DISCRETE,
 	XE_RTP_MATCH_ENGINE_CLASS,
 	XE_RTP_MATCH_NOT_ENGINE_CLASS,
 	XE_RTP_MATCH_FUNC,
+	XE_RTP_MATCH_OR,
 };
 
 /** struct xe_rtp_rule - match rule for processing entry */
@@ -83,7 +87,8 @@ struct xe_rtp_rule {
 			u8 engine_class;
 		};
 		/* MATCH_FUNC */
-		bool (*match_func)(const struct xe_gt *gt,
+		bool (*match_func)(const struct xe_device *xe,
+				   const struct xe_gt *gt,
 				   const struct xe_hw_engine *hwe);
 	};
 };
@@ -107,12 +112,14 @@ struct xe_rtp_entry {
 };
 
 enum xe_rtp_process_type {
+	XE_RTP_PROCESS_TYPE_DEVICE,
 	XE_RTP_PROCESS_TYPE_GT,
 	XE_RTP_PROCESS_TYPE_ENGINE,
 };
 
 struct xe_rtp_process_ctx {
 	union {
+		struct xe_device *xe;
 		struct xe_gt *gt;
 		struct xe_hw_engine *hwe;
 	};

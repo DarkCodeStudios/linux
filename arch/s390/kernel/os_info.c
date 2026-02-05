@@ -6,8 +6,7 @@
  * Author(s): Michael Holzheu <holzheu@linux.vnet.ibm.com>
  */
 
-#define KMSG_COMPONENT "os_info"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "os_info: " fmt
 
 #include <linux/crash_dump.h>
 #include <linux/kernel.h>
@@ -18,6 +17,7 @@
 #include <asm/physmem_info.h>
 #include <asm/maccess.h>
 #include <asm/asm-offsets.h>
+#include <asm/sections.h>
 #include <asm/ipl.h>
 
 /*
@@ -180,7 +180,7 @@ fail:
 }
 
 /*
- * Return pointer to os infor entry and its size
+ * Return pointer to os info entry and its size
  */
 void *os_info_old_entry(int nr, unsigned long *size)
 {

@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2008-2012 Intel Corporation
  */
 
@@ -8,7 +7,8 @@
 #include <linux/mutex.h>
 
 #include <drm/drm_mm.h>
-#include <drm/i915_drm.h>
+#include <drm/drm_print.h>
+#include <drm/intel/i915_drm.h>
 
 #include "gem/i915_gem_lmem.h"
 #include "gem/i915_gem_region.h"
@@ -25,6 +25,11 @@
 #include "intel_mchbar_regs.h"
 #include "intel_pci_config.h"
 
+struct intel_stolen_node {
+	struct drm_i915_private *i915;
+	struct drm_mm_node node;
+};
+
 /*
  * The BIOS typically reserves some of the system's memory for the exclusive
  * use of the integrated graphics. This memory is no longer available for
@@ -37,9 +42,9 @@
  * for is a boon.
  */
 
-int i915_gem_stolen_insert_node_in_range(struct drm_i915_private *i915,
-					 struct drm_mm_node *node, u64 size,
-					 unsigned alignment, u64 start, u64 end)
+static int __i915_gem_stolen_insert_node_in_range(struct drm_i915_private *i915,
+						  struct drm_mm_node *node, u64 size,
+						  unsigned int alignment, u64 start, u64 end)
 {
 	int ret;
 
@@ -59,22 +64,41 @@ int i915_gem_stolen_insert_node_in_range(struct drm_i915_private *i915,
 	return ret;
 }
 
-int i915_gem_stolen_insert_node(struct drm_i915_private *i915,
-				struct drm_mm_node *node, u64 size,
-				unsigned alignment)
+int i915_gem_stolen_insert_node_in_range(struct intel_stolen_node *node, u64 size,
+					 unsigned int alignment, u64 start, u64 end)
 {
-	return i915_gem_stolen_insert_node_in_range(i915, node,
-						    size, alignment,
-						    I915_GEM_STOLEN_BIAS,
-						    U64_MAX);
+	return __i915_gem_stolen_insert_node_in_range(node->i915, &node->node,
+						      size, alignment,
+						      start, end);
 }
 
-void i915_gem_stolen_remove_node(struct drm_i915_private *i915,
-				 struct drm_mm_node *node)
+static int __i915_gem_stolen_insert_node(struct drm_i915_private *i915,
+					 struct drm_mm_node *node, u64 size,
+					 unsigned int alignment)
+{
+	return __i915_gem_stolen_insert_node_in_range(i915, node,
+						      size, alignment,
+						      I915_GEM_STOLEN_BIAS,
+						      U64_MAX);
+}
+
+int i915_gem_stolen_insert_node(struct intel_stolen_node *node, u64 size,
+				unsigned int alignment)
+{
+	return __i915_gem_stolen_insert_node(node->i915, &node->node, size, alignment);
+}
+
+static void __i915_gem_stolen_remove_node(struct drm_i915_private *i915,
+					  struct drm_mm_node *node)
 {
 	mutex_lock(&i915->mm.stolen_lock);
 	drm_mm_remove_node(node);
 	mutex_unlock(&i915->mm.stolen_lock);
+}
+
+void i915_gem_stolen_remove_node(struct intel_stolen_node *node)
+{
+	__i915_gem_stolen_remove_node(node->i915, &node->node);
 }
 
 static bool valid_stolen_size(struct drm_i915_private *i915, struct resource *dsm)
@@ -457,7 +481,7 @@ static int init_reserved_stolen(struct drm_i915_private *i915)
 		icl_get_stolen_reserved(i915, uncore,
 					&reserved_base, &reserved_size);
 	} else if (GRAPHICS_VER(i915) >= 8) {
-		if (IS_LP(i915))
+		if (IS_CHERRYVIEW(i915) || IS_BROXTON(i915) || IS_GEMINILAKE(i915))
 			chv_get_stolen_reserved(i915, uncore,
 						&reserved_base, &reserved_size);
 		else
@@ -684,7 +708,7 @@ i915_gem_object_release_stolen(struct drm_i915_gem_object *obj)
 	struct drm_mm_node *stolen = fetch_and_zero(&obj->stolen);
 
 	GEM_BUG_ON(!stolen);
-	i915_gem_stolen_remove_node(i915, stolen);
+	__i915_gem_stolen_remove_node(i915, stolen);
 	kfree(stolen);
 
 	i915_gem_object_release_memory_region(obj);
@@ -773,8 +797,8 @@ static int _i915_gem_object_stolen_init(struct intel_memory_region *mem,
 		ret = drm_mm_reserve_node(&i915->mm.stolen, stolen);
 		mutex_unlock(&i915->mm.stolen_lock);
 	} else {
-		ret = i915_gem_stolen_insert_node(i915, stolen, size,
-						  mem->min_page_size);
+		ret = __i915_gem_stolen_insert_node(i915, stolen, size,
+						    mem->min_page_size);
 	}
 	if (ret)
 		goto err_free;
@@ -786,7 +810,7 @@ static int _i915_gem_object_stolen_init(struct intel_memory_region *mem,
 	return 0;
 
 err_remove:
-	i915_gem_stolen_remove_node(i915, stolen);
+	__i915_gem_stolen_remove_node(i915, stolen);
 err_free:
 	kfree(stolen);
 	return ret;
@@ -936,8 +960,12 @@ i915_gem_stolen_lmem_setup(struct drm_i915_private *i915, u16 type,
 	} else {
 		/* Use DSM base address instead for stolen memory */
 		dsm_base = intel_uncore_read64(uncore, GEN6_DSMBASE) & GEN11_BDSM_MASK;
-		if (WARN_ON(lmem_size < dsm_base))
-			return ERR_PTR(-ENODEV);
+		if (lmem_size < dsm_base) {
+			drm_dbg(&i915->drm,
+				"Disabling stolen memory support due to OOB placement: lmem_size = %pa vs dsm_base = %pa\n",
+				&lmem_size, &dsm_base);
+			return NULL;
+		}
 		dsm_size = ALIGN_DOWN(lmem_size - dsm_base, SZ_1M);
 	}
 
@@ -997,38 +1025,64 @@ bool i915_gem_object_is_stolen(const struct drm_i915_gem_object *obj)
 	return obj->ops == &i915_gem_object_stolen_ops;
 }
 
-bool i915_gem_stolen_initialized(const struct drm_i915_private *i915)
+bool i915_gem_stolen_initialized(struct drm_device *drm)
 {
+	struct drm_i915_private *i915 = to_i915(drm);
+
 	return drm_mm_initialized(&i915->mm.stolen);
 }
 
-u64 i915_gem_stolen_area_address(const struct drm_i915_private *i915)
+u64 i915_gem_stolen_area_address(struct drm_device *drm)
 {
+	struct drm_i915_private *i915 = to_i915(drm);
+
 	return i915->dsm.stolen.start;
 }
 
-u64 i915_gem_stolen_area_size(const struct drm_i915_private *i915)
+u64 i915_gem_stolen_area_size(struct drm_device *drm)
 {
+	struct drm_i915_private *i915 = to_i915(drm);
+
 	return resource_size(&i915->dsm.stolen);
 }
 
-u64 i915_gem_stolen_node_address(const struct drm_i915_private *i915,
-				 const struct drm_mm_node *node)
+u64 i915_gem_stolen_node_address(const struct intel_stolen_node *node)
 {
+	struct drm_i915_private *i915 = node->i915;
+
 	return i915->dsm.stolen.start + i915_gem_stolen_node_offset(node);
 }
 
-bool i915_gem_stolen_node_allocated(const struct drm_mm_node *node)
+bool i915_gem_stolen_node_allocated(const struct intel_stolen_node *node)
 {
-	return drm_mm_node_allocated(node);
+	return drm_mm_node_allocated(&node->node);
 }
 
-u64 i915_gem_stolen_node_offset(const struct drm_mm_node *node)
+u64 i915_gem_stolen_node_offset(const struct intel_stolen_node *node)
 {
-	return node->start;
+	return node->node.start;
 }
 
-u64 i915_gem_stolen_node_size(const struct drm_mm_node *node)
+u64 i915_gem_stolen_node_size(const struct intel_stolen_node *node)
 {
-	return node->size;
+	return node->node.size;
+}
+
+struct intel_stolen_node *i915_gem_stolen_node_alloc(struct drm_device *drm)
+{
+	struct drm_i915_private *i915 = to_i915(drm);
+	struct intel_stolen_node *node;
+
+	node = kzalloc(sizeof(*node), GFP_KERNEL);
+	if (!node)
+		return NULL;
+
+	node->i915 = i915;
+
+	return node;
+}
+
+void i915_gem_stolen_node_free(const struct intel_stolen_node *node)
+{
+	kfree(node);
 }

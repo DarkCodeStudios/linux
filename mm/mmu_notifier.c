@@ -4,7 +4,7 @@
  *
  *  Copyright (C) 2008  Qumranet, Inc.
  *  Copyright (C) 2008  SGI
- *             Christoph Lameter <cl@linux.com>
+ *             Christoph Lameter <cl@gentwo.org>
  */
 
 #include <linux/rculist.h>
@@ -18,6 +18,8 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
+
+#include "vma.h"
 
 /* global SRCU for all MMs */
 DEFINE_STATIC_SRCU(srcu);

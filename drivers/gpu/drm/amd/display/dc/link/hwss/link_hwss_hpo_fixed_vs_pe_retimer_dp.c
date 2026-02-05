@@ -74,7 +74,7 @@ static void dp_hpo_fixed_vs_pe_retimer_set_tx_ffe(struct dc_link *link,
 static void dp_hpo_fixed_vs_pe_retimer_program_override_test_pattern(struct dc_link *link,
 		struct encoder_set_dp_phy_pattern_param *tp_params)
 {
-	uint8_t clk_src = 0x4C;
+	uint8_t clk_src = 0xC4;
 	uint8_t pattern = 0x4F; /* SQ128 */
 
 	const uint8_t vendor_lttpr_write_data_pg0[4] = {0x1, 0x11, 0x0, 0x0};
@@ -165,7 +165,12 @@ static void set_hpo_fixed_vs_pe_retimer_dp_link_test_pattern(struct dc_link *lin
 		link_res->hpo_dp_link_enc->funcs->set_link_test_pattern(
 				link_res->hpo_dp_link_enc, tp_params);
 	}
+
 	link->dc->link_srv->dp_trace_source_sequence(link, DPCD_SOURCE_SEQ_AFTER_SET_SOURCE_PATTERN);
+
+	// Give retimer extra time to lock before updating DP_TRAINING_PATTERN_SET to TPS1 or phy pattern
+	if (tp_params->dp_phy_pattern != DP_TEST_PATTERN_128b_132b_TPS2_TRAINING_MODE)
+		msleep(50);
 }
 
 static void set_hpo_fixed_vs_pe_retimer_dp_lane_settings(struct dc_link *link,

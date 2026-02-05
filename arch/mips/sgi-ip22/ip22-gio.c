@@ -111,7 +111,7 @@ void gio_device_unregister(struct gio_device *giodev)
 }
 EXPORT_SYMBOL_GPL(gio_device_unregister);
 
-static int gio_bus_match(struct device *dev, struct device_driver *drv)
+static int gio_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct gio_device *gio_dev = to_gio_device(dev);
 	struct gio_driver *gio_drv = to_gio_driver(drv);
@@ -165,9 +165,8 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *a,
 			     char *buf)
 {
 	struct gio_device *gio_dev = to_gio_device(dev);
-	int len = snprintf(buf, PAGE_SIZE, "gio:%x\n", gio_dev->id.id);
 
-	return (len >= PAGE_SIZE) ? (PAGE_SIZE - 1) : len;
+	return sysfs_emit(buf, "gio:%x\n", gio_dev->id.id);
 }
 static DEVICE_ATTR_RO(modalias);
 
@@ -177,7 +176,7 @@ static ssize_t name_show(struct device *dev,
 	struct gio_device *giodev;
 
 	giodev = to_gio_device(dev);
-	return sprintf(buf, "%s", giodev->name);
+	return sysfs_emit(buf, "%s\n", giodev->name);
 }
 static DEVICE_ATTR_RO(name);
 
@@ -187,7 +186,7 @@ static ssize_t id_show(struct device *dev,
 	struct gio_device *giodev;
 
 	giodev = to_gio_device(dev);
-	return sprintf(buf, "%x", giodev->id.id);
+	return sysfs_emit(buf, "%x\n", giodev->id.id);
 }
 static DEVICE_ATTR_RO(id);
 
@@ -246,7 +245,7 @@ void gio_set_master(struct gio_device *dev)
 }
 EXPORT_SYMBOL_GPL(gio_set_master);
 
-void ip22_gio_set_64bit(int slotno)
+static void ip22_gio_set_64bit(int slotno)
 {
 	u32 tmp = sgimc->giopar;
 
@@ -373,7 +372,8 @@ static void ip22_check_gio(int slotno, unsigned long addr, int irq)
 		gio_dev->resource.flags = IORESOURCE_MEM;
 		gio_dev->irq = irq;
 		dev_set_name(&gio_dev->dev, "%d", slotno);
-		gio_device_register(gio_dev);
+		if (gio_device_register(gio_dev))
+			gio_dev_put(gio_dev);
 	} else
 		printk(KERN_INFO "GIO: slot %d : Empty\n", slotno);
 }
@@ -395,7 +395,7 @@ static struct resource gio_bus_resource = {
 	.flags = IORESOURCE_MEM,
 };
 
-int __init ip22_gio_init(void)
+static int __init ip22_gio_init(void)
 {
 	unsigned int pbdma __maybe_unused;
 	int ret;

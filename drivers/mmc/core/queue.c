@@ -184,9 +184,9 @@ static void mmc_queue_setup_discard(struct mmc_card *card,
 		return;
 
 	lim->max_hw_discard_sectors = max_discard;
-	if (mmc_can_secure_erase_trim(card))
+	if (mmc_card_can_secure_erase_trim(card))
 		lim->max_secure_erase_sectors = max_discard;
-	if (mmc_can_trim(card) && card->erased_byte == 0)
+	if (mmc_card_can_trim(card) && card->erased_byte == 0)
 		lim->max_write_zeroes_sectors = max_discard;
 
 	/* granularity must not be greater than max. discard */
@@ -344,13 +344,15 @@ static const struct blk_mq_ops mmc_mq_ops = {
 };
 
 static struct gendisk *mmc_alloc_disk(struct mmc_queue *mq,
-		struct mmc_card *card)
+		struct mmc_card *card, unsigned int features)
 {
 	struct mmc_host *host = card->host;
-	struct queue_limits lim = { };
+	struct queue_limits lim = {
+		.features		= features,
+	};
 	struct gendisk *disk;
 
-	if (mmc_can_erase(card))
+	if (mmc_card_can_erase(card))
 		mmc_queue_setup_discard(card, &lim);
 
 	lim.max_hw_sectors = min(host->max_blk_count, host->max_req_size / 512);
@@ -376,19 +378,18 @@ static struct gendisk *mmc_alloc_disk(struct mmc_queue *mq,
 		lim.max_segments = host->max_segs;
 	}
 
+	if (mmc_host_is_spi(host) && host->use_spi_crc)
+		lim.features |= BLK_FEAT_STABLE_WRITES;
+
 	disk = blk_mq_alloc_disk(&mq->tag_set, &lim, mq);
 	if (IS_ERR(disk))
 		return disk;
 	mq->queue = disk->queue;
 
-	if (mmc_host_is_spi(host) && host->use_spi_crc)
-		blk_queue_flag_set(QUEUE_FLAG_STABLE_WRITES, mq->queue);
 	blk_queue_rq_timeout(mq->queue, 60 * HZ);
 
-	blk_queue_flag_set(QUEUE_FLAG_NONROT, mq->queue);
-	blk_queue_flag_clear(QUEUE_FLAG_ADD_RANDOM, mq->queue);
-
-	dma_set_max_seg_size(mmc_dev(host), queue_max_segment_size(mq->queue));
+	if (mmc_dev(host)->dma_parms)
+		dma_set_max_seg_size(mmc_dev(host), queue_max_segment_size(mq->queue));
 
 	INIT_WORK(&mq->recovery_work, mmc_mq_recovery_handler);
 	INIT_WORK(&mq->complete_work, mmc_blk_mq_complete_work);
@@ -413,10 +414,12 @@ static inline bool mmc_merge_capable(struct mmc_host *host)
  * mmc_init_queue - initialise a queue structure.
  * @mq: mmc queue
  * @card: mmc card to attach this queue
+ * @features: block layer features (BLK_FEAT_*)
  *
  * Initialise a MMC card request queue.
  */
-struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
+struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
+		unsigned int features)
 {
 	struct mmc_host *host = card->host;
 	struct gendisk *disk;
@@ -438,7 +441,7 @@ struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 	else
 		mq->tag_set.queue_depth = MMC_QUEUE_DEPTH;
 	mq->tag_set.numa_node = NUMA_NO_NODE;
-	mq->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING;
+	mq->tag_set.flags = BLK_MQ_F_BLOCKING;
 	mq->tag_set.nr_hw_queues = 1;
 	mq->tag_set.cmd_size = sizeof(struct mmc_queue_req);
 	mq->tag_set.driver_data = mq;
@@ -460,7 +463,7 @@ struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 		return ERR_PTR(ret);
 		
 
-	disk = mmc_alloc_disk(mq, card);
+	disk = mmc_alloc_disk(mq, card, features);
 	if (IS_ERR(disk))
 		blk_mq_free_tag_set(&mq->tag_set);
 	return disk;
@@ -520,5 +523,5 @@ unsigned int mmc_queue_map_sg(struct mmc_queue *mq, struct mmc_queue_req *mqrq)
 {
 	struct request *req = mmc_queue_req_to_req(mqrq);
 
-	return blk_rq_map_sg(mq->queue, req, mqrq->sg);
+	return blk_rq_map_sg(req, mqrq->sg);
 }

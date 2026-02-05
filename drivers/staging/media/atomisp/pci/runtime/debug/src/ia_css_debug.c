@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include "debug.h"
@@ -60,7 +51,6 @@
 #include "sp.h"
 #include "isp.h"
 #include "type_support.h"
-#include "math_support.h" /* CEIL_DIV */
 #include "input_system.h"	/* input_formatter_reg_load */
 #include "ia_css_tagger_common.h"
 
@@ -130,7 +120,8 @@ static const char *const pipe_id_to_str[] = {
 	/* [IA_CSS_PIPE_ID_YUVPP]     =*/ "yuvpp",
 };
 
-static char dot_id_input_bin[SH_CSS_MAX_BINARY_NAME + 10];
+/* 27 is combined length of _stage%d(pipe%d)\0. */
+static char dot_id_input_bin[SH_CSS_MAX_BINARY_NAME + 27];
 static char ring_buffer[200];
 
 void ia_css_debug_dtrace(unsigned int level, const char *fmt, ...)
@@ -848,7 +839,7 @@ void ia_css_debug_enable_sp_sleep_mode(enum ia_css_sp_sleep_mode mode)
 	fw = &sh_css_sp_fw;
 	HIVE_ADDR_sp_sleep_mode = fw->info.sp.sleep_mode;
 
-	(void)HIVE_ADDR_sp_sleep_mode;	/* Suppres warnings in CRUN */
+	(void)HIVE_ADDR_sp_sleep_mode;	/* Suppress warnings in CRUN */
 
 	sp_dmem_store_uint32(SP0_ID,
 			     (unsigned int)sp_address_of(sp_sleep_mode),
@@ -1334,7 +1325,7 @@ ia_css_debug_pipe_graph_dump_stage(
 
 	if (stage->stage_num == 0) {
 		/*
-		 * There are some implicite assumptions about which bin is the
+		 * There are some implicit assumptions about which bin is the
 		 * input binary e.g. which one is connected to the input system
 		 * Priority:
 		 * 1) sp_raw_copy bin has highest priority

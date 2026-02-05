@@ -7,7 +7,6 @@
 #include <linux/string_helpers.h>
 #include <linux/bug.h>
 #include <linux/mutex.h>
-#include <linux/cpumask.h>
 #include <linux/nodemask.h>
 #include <linux/fs.h>
 #include <linux/cred.h>
@@ -182,6 +181,7 @@ int seq_open_private(struct file *, const struct seq_operations *, int);
 int seq_release_private(struct inode *, struct file *);
 
 #ifdef CONFIG_BINARY_PRINTF
+__printf(2, 0)
 void seq_bprintf(struct seq_file *m, const char *f, const u32 *binary);
 #endif
 

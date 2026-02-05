@@ -976,13 +976,6 @@ static struct drx_aud_data drxj_default_aud_data_g = {
 /*-----------------------------------------------------------------------------
 STRUCTURES
 ----------------------------------------------------------------------------*/
-struct drxjeq_stat {
-	u16 eq_mse;
-	u8 eq_mode;
-	u8 eq_ctrl;
-	u8 eq_stat;
-};
-
 /* HI command */
 struct drxj_hi_cmd {
 	u16 cmd;
@@ -1277,7 +1270,7 @@ static const u16 nicam_presc_table_val[43] = {
    TODO: check ignoring single/multimaster is ok for AUD access ?
 */
 
-#define DRXJ_ISAUDWRITE(addr) (((((addr)>>16)&1) == 1) ? true : false)
+#define DRXJ_ISAUDWRITE(addr) ((((addr) >> 16) & 1) == 1)
 #define DRXJ_DAP_AUDTRIF_TIMEOUT 80	/* millisec */
 /*============================================================================*/
 

@@ -647,9 +647,9 @@ void dcn31_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params
 			dcn3_1_soc.clock_limits[closest_clk_lvl].phyclk_d18_mhz;
 		s[i].phyclk_mhz = dcn3_1_soc.clock_limits[closest_clk_lvl].phyclk_mhz;
 	}
-	if (clk_table->num_entries) {
+
+	if (clk_table->num_entries)
 		dcn3_1_soc.num_states = clk_table->num_entries;
-	}
 
 	memcpy(dcn3_1_soc.clock_limits, s, sizeof(dcn3_1_soc.clock_limits));
 
@@ -762,23 +762,11 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 				break;
 			}
 		}
-		// Ported from DCN315
-		if (clk_table->num_entries == 1) {
-			/*smu gives one DPM level, let's take the highest one*/
-			closest_clk_lvl = dcn3_16_soc.num_states - 1;
-		}
 
 		s[i].state = i;
 
 		/* Clocks dependent on voltage level. */
 		s[i].dcfclk_mhz = clk_table->entries[i].dcfclk_mhz;
-		if (clk_table->num_entries == 1 &&
-		    s[i].dcfclk_mhz <
-		    dcn3_16_soc.clock_limits[closest_clk_lvl].dcfclk_mhz) {
-			/*SMU fix not released yet*/
-			s[i].dcfclk_mhz =
-				dcn3_16_soc.clock_limits[closest_clk_lvl].dcfclk_mhz;
-		}
 		s[i].fabricclk_mhz = clk_table->entries[i].fclk_mhz;
 		s[i].socclk_mhz = clk_table->entries[i].socclk_mhz;
 		s[i].dram_speed_mts = clk_table->entries[i].memclk_mhz *
@@ -799,9 +787,9 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 			dcn3_16_soc.clock_limits[closest_clk_lvl].phyclk_d18_mhz;
 		s[i].phyclk_mhz = dcn3_16_soc.clock_limits[closest_clk_lvl].phyclk_mhz;
 	}
-	if (clk_table->num_entries) {
+
+	if (clk_table->num_entries)
 		dcn3_16_soc.num_states = clk_table->num_entries;
-	}
 
 	memcpy(dcn3_16_soc.clock_limits, s, sizeof(dcn3_16_soc.clock_limits));
 
@@ -820,6 +808,8 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 
 int dcn_get_max_non_odm_pix_rate_100hz(struct _vcs_dpi_soc_bounding_box_st *soc)
 {
+	dc_assert_fp_enabled();
+
 	return soc->clock_limits[0].dispclk_mhz * 10000.0 / (1.0 + soc->dcn_downspread_percent / 100.0);
 }
 
@@ -827,6 +817,8 @@ int dcn_get_approx_det_segs_required_for_pstate(
 		struct _vcs_dpi_soc_bounding_box_st *soc,
 		int pix_clk_100hz, int bpp, int seg_size_kb)
 {
+	dc_assert_fp_enabled();
+
 	/* Roughly calculate required crb to hide latency. In practice there is slightly
 	 * more buffer available for latency hiding
 	 */

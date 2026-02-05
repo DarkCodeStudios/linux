@@ -33,11 +33,17 @@
  * blocks for the Data Fabric Interface that are not clock/power gated.
  */
 
+#include "dc/dc_hw_types.h"
+
 enum dcc_control {
 	dcc_control__256_256_xxx,
 	dcc_control__128_128_xxx,
 	dcc_control__256_64_64,
 	dcc_control__256_128_128,
+	dcc_control__256_256,
+	dcc_control__256_128,
+	dcc_control__256_64,
+
 };
 
 enum segment_order {
@@ -72,8 +78,15 @@ enum dcn_hubbub_page_table_depth {
 
 enum dcn_hubbub_page_table_block_size {
 	DCN_PAGE_TABLE_BLOCK_SIZE_4KB = 0,
+	DCN_PAGE_TABLE_BLOCK_SIZE_8KB = 1,
+	DCN_PAGE_TABLE_BLOCK_SIZE_16KB = 2,
+	DCN_PAGE_TABLE_BLOCK_SIZE_32KB = 3,
 	DCN_PAGE_TABLE_BLOCK_SIZE_64KB = 4,
-	DCN_PAGE_TABLE_BLOCK_SIZE_32KB = 3
+	DCN_PAGE_TABLE_BLOCK_SIZE_128KB = 5,
+	DCN_PAGE_TABLE_BLOCK_SIZE_256KB = 6,
+	DCN_PAGE_TABLE_BLOCK_SIZE_512KB = 7,
+	DCN_PAGE_TABLE_BLOCK_SIZE_1024KB = 8,
+	DCN_PAGE_TABLE_BLOCK_SIZE_2048KB = 9
 };
 
 struct dcn_hubbub_phys_addr_config {
@@ -124,6 +137,27 @@ struct dcn_hubbub_state {
 	uint32_t dram_state_cntl;
 };
 
+struct dcn_hubbub_reg_state {
+	uint32_t det0_ctrl;
+	uint32_t det1_ctrl;
+	uint32_t det2_ctrl;
+	uint32_t det3_ctrl;
+	uint32_t compbuf_ctrl;
+};
+
+struct hubbub_system_latencies {
+	uint32_t max_latency_ns;
+	uint32_t avg_latency_ns;
+	uint32_t min_latency_ns;
+};
+
+struct hubbub_urgent_latency_params {
+	uint32_t refclk_mhz;
+	uint32_t t_win_ns;
+	uint32_t bandwidth_mbps;
+	uint32_t bw_factor_x1000;
+};
+
 struct hubbub_funcs {
 	void (*update_dchub)(
 			struct hubbub *hubbub,
@@ -147,6 +181,17 @@ struct hubbub_funcs {
 			enum segment_order *segment_order_horz,
 			enum segment_order *segment_order_vert);
 
+	bool (*dcc_support_swizzle_addr3)(
+			enum swizzle_mode_addr3_values swizzle,
+			unsigned int plane_pitch,
+			unsigned int bytes_per_element,
+			enum segment_order *segment_order_horz,
+			enum segment_order *segment_order_vert);
+
+	bool (*dcc_support_pixel_format_plane0_plane1)(
+			enum surface_pixel_format format,
+			unsigned int *plane0_bpe,
+			unsigned int *plane1_bpe);
 	bool (*dcc_support_pixel_format)(
 			enum surface_pixel_format format,
 			unsigned int *bytes_per_element);
@@ -179,6 +224,8 @@ struct hubbub_funcs {
 
 	void (*init_watermarks)(struct hubbub *hubbub);
 
+	void (*hubbub_read_reg_state)(struct hubbub *hubbub, struct dcn_hubbub_reg_state *hubbub_reg_state);
+
 	/**
 	 * @program_det_size:
 	 *
@@ -201,6 +248,43 @@ struct hubbub_funcs {
 	void (*set_request_limit)(struct hubbub *hubbub, int memory_channel_count, int words_per_channel);
 	void (*dchubbub_init)(struct hubbub *hubbub);
 	void (*get_mall_en)(struct hubbub *hubbub, unsigned int *mall_in_use);
+	void (*program_det_segments)(struct hubbub *hubbub, int hubp_inst, unsigned det_buffer_size_seg);
+	void (*program_compbuf_segments)(struct hubbub *hubbub, unsigned compbuf_size_seg, bool safe_to_increase);
+	void (*wait_for_det_update)(struct hubbub *hubbub, int hubp_inst);
+	bool (*program_arbiter)(struct hubbub *hubbub, struct dml2_display_arb_regs *arb_regs, bool safe_to_lower);
+	void (*dchvm_init)(struct hubbub *hubbub);
+
+	struct hubbub_perfmon_funcs {
+		void (*reset)(struct hubbub *hubbub);
+		void (*start_measuring_max_memory_latency_ns)(
+				struct hubbub *hubbub);
+		uint32_t (*get_max_memory_latency_ns)(struct hubbub *hubbub,
+				uint32_t refclk_mhz, uint32_t *sample_count);
+		void (*start_measuring_average_memory_latency_ns)(
+				struct hubbub *hubbub);
+		uint32_t (*get_average_memory_latency_ns)(struct hubbub *hubbub,
+				uint32_t refclk_mhz, uint32_t *sample_count);
+		void (*start_measuring_urgent_ramp_latency_ns)(
+				struct hubbub *hubbub,
+				const struct hubbub_urgent_latency_params *params);
+		uint32_t (*get_urgent_ramp_latency_ns)(struct hubbub *hubbub,
+				uint32_t refclk_mhz);
+		void (*start_measuring_unbounded_bandwidth_mbps)(
+				struct hubbub *hubbub);
+		uint32_t (*get_unbounded_bandwidth_mbps)(struct hubbub *hubbub,
+				uint32_t refclk_mhz, uint32_t *duration_ns);
+		void (*start_measuring_average_bandwidth_mbps)(
+				struct hubbub *hubbub);
+		uint32_t (*get_average_bandwidth_mbps)(struct hubbub *hubbub,
+				uint32_t refclk_mhz, uint32_t min_duration_ns,
+				uint32_t *duration_ns);
+	} perfmon;
+
+	struct hubbub_qos_funcs {
+		void (*force_display_nominal_profile)(struct hubbub *hubbub);
+		void (*force_display_urgent_profile)(struct hubbub *hubbub);
+		void (*reset_display_qos_profile)(struct hubbub *hubbub);
+	} qos;
 };
 
 struct hubbub {

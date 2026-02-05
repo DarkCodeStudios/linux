@@ -35,6 +35,9 @@
 #include "amdgpu_dm_trace.h"
 #include "amdgpu_dm_debugfs.h"
 
+#define HPD_DETECTION_PERIOD_uS 2000000
+#define HPD_DETECTION_TIME_uS 100000
+
 void amdgpu_dm_crtc_handle_vblank(struct amdgpu_crtc *acrtc)
 {
 	struct drm_crtc *crtc = &acrtc->base;
@@ -90,7 +93,7 @@ int amdgpu_dm_crtc_set_vupdate_irq(struct drm_crtc *crtc, bool enable)
 	return rc;
 }
 
-bool amdgpu_dm_crtc_vrr_active(struct dm_crtc_state *dm_state)
+bool amdgpu_dm_crtc_vrr_active(const struct dm_crtc_state *dm_state)
 {
 	return dm_state->freesync_config.state == VRR_STATE_ACTIVE_VARIABLE ||
 	       dm_state->freesync_config.state == VRR_STATE_ACTIVE_FIXED;
@@ -110,6 +113,7 @@ bool amdgpu_dm_crtc_vrr_active(struct dm_crtc_state *dm_state)
  *
  * Panel Replay and PSR SU
  * - Enable when:
+ *      - VRR is disabled
  *      - vblank counter is disabled
  *      - entry is allowed: usermode demonstrates an adequate number of fast
  *        commits)
@@ -128,27 +132,115 @@ static void amdgpu_dm_crtc_set_panel_sr_feature(
 	bool is_sr_active = (link->replay_settings.replay_allow_active ||
 				 link->psr_settings.psr_allow_active);
 	bool is_crc_window_active = false;
+	bool vrr_active = amdgpu_dm_crtc_vrr_active_irq(vblank_work->acrtc);
 
 #ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
 	is_crc_window_active =
 		amdgpu_dm_crc_window_is_activated(&vblank_work->acrtc->base);
 #endif
 
-	if (link->replay_settings.replay_feature_enabled &&
+	if (link->replay_settings.replay_feature_enabled && !vrr_active &&
 		allow_sr_entry && !is_sr_active && !is_crc_window_active) {
 		amdgpu_dm_replay_enable(vblank_work->stream, true);
 	} else if (vblank_enabled) {
 		if (link->psr_settings.psr_version < DC_PSR_VERSION_SU_1 && is_sr_active)
-			amdgpu_dm_psr_disable(vblank_work->stream);
-	} else if (link->psr_settings.psr_feature_enabled &&
+			amdgpu_dm_psr_disable(vblank_work->stream, false);
+	} else if (link->psr_settings.psr_feature_enabled && !vrr_active &&
 		allow_sr_entry && !is_sr_active && !is_crc_window_active) {
 
 		struct amdgpu_dm_connector *aconn =
 			(struct amdgpu_dm_connector *) vblank_work->stream->dm_stream_context;
 
-		if (!aconn->disallow_edp_enter_psr)
+		if (!aconn->disallow_edp_enter_psr) {
+			struct amdgpu_display_manager *dm = vblank_work->dm;
+
 			amdgpu_dm_psr_enable(vblank_work->stream);
+			if (dm->idle_workqueue &&
+			    (dm->dc->config.disable_ips == DMUB_IPS_ENABLE) &&
+			    dm->dc->idle_optimizations_allowed &&
+			    dm->idle_workqueue->enable &&
+			    !dm->idle_workqueue->running)
+				schedule_work(&dm->idle_workqueue->work);
+		}
 	}
+}
+
+bool amdgpu_dm_is_headless(struct amdgpu_device *adev)
+{
+	struct drm_connector *connector;
+	struct drm_connector_list_iter iter;
+	struct drm_device *dev;
+	bool is_headless = true;
+
+	if (adev == NULL)
+		return true;
+
+	dev = adev->dm.ddev;
+
+	drm_connector_list_iter_begin(dev, &iter);
+	drm_for_each_connector_iter(connector, &iter) {
+
+		if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
+			continue;
+
+		if (connector->status == connector_status_connected) {
+			is_headless = false;
+			break;
+		}
+	}
+	drm_connector_list_iter_end(&iter);
+	return is_headless;
+}
+
+static void amdgpu_dm_idle_worker(struct work_struct *work)
+{
+	struct idle_workqueue *idle_work;
+
+	idle_work = container_of(work, struct idle_workqueue, work);
+	idle_work->dm->idle_workqueue->running = true;
+
+	while (idle_work->enable) {
+		fsleep(HPD_DETECTION_PERIOD_uS);
+		mutex_lock(&idle_work->dm->dc_lock);
+		if (!idle_work->dm->dc->idle_optimizations_allowed) {
+			mutex_unlock(&idle_work->dm->dc_lock);
+			break;
+		}
+		dc_allow_idle_optimizations(idle_work->dm->dc, false);
+
+		mutex_unlock(&idle_work->dm->dc_lock);
+		fsleep(HPD_DETECTION_TIME_uS);
+		mutex_lock(&idle_work->dm->dc_lock);
+
+		if (!amdgpu_dm_is_headless(idle_work->dm->adev) &&
+		    !amdgpu_dm_psr_is_active_allowed(idle_work->dm)) {
+			mutex_unlock(&idle_work->dm->dc_lock);
+			break;
+		}
+
+		if (idle_work->enable) {
+			dc_post_update_surfaces_to_stream(idle_work->dm->dc);
+			dc_allow_idle_optimizations(idle_work->dm->dc, true);
+		}
+		mutex_unlock(&idle_work->dm->dc_lock);
+	}
+	idle_work->dm->idle_workqueue->running = false;
+}
+
+struct idle_workqueue *idle_create_workqueue(struct amdgpu_device *adev)
+{
+	struct idle_workqueue *idle_work;
+
+	idle_work = kzalloc(sizeof(*idle_work), GFP_KERNEL);
+	if (ZERO_OR_NULL_PTR(idle_work))
+		return NULL;
+
+	idle_work->dm = &adev->dm;
+	idle_work->enable = false;
+	idle_work->running = false;
+	INIT_WORK(&idle_work->work, amdgpu_dm_idle_worker);
+
+	return idle_work;
 }
 
 static void amdgpu_dm_crtc_vblank_control_worker(struct work_struct *work)
@@ -164,9 +256,8 @@ static void amdgpu_dm_crtc_vblank_control_worker(struct work_struct *work)
 	else if (dm->active_vblank_irq_count)
 		dm->active_vblank_irq_count--;
 
-	dc_allow_idle_optimizations(dm->dc, dm->active_vblank_irq_count == 0);
-
-	DRM_DEBUG_KMS("Allow idle optimizations (MALL): %d\n", dm->active_vblank_irq_count == 0);
+	if (dm->active_vblank_irq_count > 0)
+		dc_allow_idle_optimizations(dm->dc, false);
 
 	/*
 	 * Control PSR based on vblank requirements from OS
@@ -178,11 +269,15 @@ static void amdgpu_dm_crtc_vblank_control_worker(struct work_struct *work)
 	 * where the SU region is the full hactive*vactive region. See
 	 * fill_dc_dirty_rects().
 	 */
-	if (vblank_work->stream && vblank_work->stream->link) {
+	if (vblank_work->stream && vblank_work->stream->link && vblank_work->acrtc) {
 		amdgpu_dm_crtc_set_panel_sr_feature(
 			vblank_work, vblank_work->enable,
-			vblank_work->acrtc->dm_irq_params.allow_psr_entry ||
-			vblank_work->stream->link->replay_settings.replay_feature_enabled);
+			vblank_work->acrtc->dm_irq_params.allow_sr_entry);
+	}
+
+	if (dm->active_vblank_irq_count == 0) {
+		dc_post_update_surfaces_to_stream(dm->dc);
+		dc_allow_idle_optimizations(dm->dc, true);
 	}
 
 	mutex_unlock(&dm->dc_lock);
@@ -199,31 +294,100 @@ static inline int amdgpu_dm_crtc_set_vblank(struct drm_crtc *crtc, bool enable)
 	struct dm_crtc_state *acrtc_state = to_dm_crtc_state(crtc->state);
 	struct amdgpu_display_manager *dm = &adev->dm;
 	struct vblank_control_work *work;
+	int irq_type;
 	int rc = 0;
 
-	if (acrtc->otg_inst == -1)
-		goto skip;
+	if (enable && !acrtc->base.enabled) {
+		drm_dbg_vbl(crtc->dev,
+				"Reject vblank enable on unconfigured CRTC %d (enabled=%d)\n",
+				acrtc->crtc_id, acrtc->base.enabled);
+		return -EINVAL;
+	}
+
+	irq_type = amdgpu_display_crtc_idx_to_irq_type(adev, acrtc->crtc_id);
 
 	if (enable) {
-		/* vblank irq on -> Only need vupdate irq in vrr mode */
-		if (amdgpu_dm_crtc_vrr_active(acrtc_state))
-			rc = amdgpu_dm_crtc_set_vupdate_irq(crtc, true);
-	} else {
-		/* vblank irq off -> vupdate irq off */
-		rc = amdgpu_dm_crtc_set_vupdate_irq(crtc, false);
+		struct dc *dc = adev->dm.dc;
+		struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
+		struct psr_settings *psr = &acrtc_state->stream->link->psr_settings;
+		struct replay_settings *pr = &acrtc_state->stream->link->replay_settings;
+		bool sr_supported = (psr->psr_version != DC_PSR_VERSION_UNSUPPORTED) ||
+								pr->config.replay_supported;
+
+		/*
+		 * IPS & self-refresh feature can cause vblank counter resets between
+		 * vblank disable and enable.
+		 * It may cause system stuck due to waiting for the vblank counter.
+		 * Call this function to estimate missed vblanks by using timestamps and
+		 * update the vblank counter in DRM.
+		 */
+		if (dc->caps.ips_support &&
+			dc->config.disable_ips != DMUB_IPS_DISABLE_ALL &&
+			sr_supported && vblank->config.disable_immediate)
+			drm_crtc_vblank_restore(crtc);
+	}
+
+	if (dc_supports_vrr(dm->dc->ctx->dce_version)) {
+		if (enable) {
+			/* vblank irq on -> Only need vupdate irq in vrr mode */
+			if (amdgpu_dm_crtc_vrr_active(acrtc_state))
+				rc = amdgpu_dm_crtc_set_vupdate_irq(crtc, true);
+		} else {
+			/* vblank irq off -> vupdate irq off */
+			rc = amdgpu_dm_crtc_set_vupdate_irq(crtc, false);
+		}
 	}
 
 	if (rc)
 		return rc;
 
-	rc = (enable)
-		? amdgpu_irq_get(adev, &adev->crtc_irq, acrtc->crtc_id)
-		: amdgpu_irq_put(adev, &adev->crtc_irq, acrtc->crtc_id);
+	/* crtc vblank or vstartup interrupt */
+	if (enable) {
+		rc = amdgpu_irq_get(adev, &adev->crtc_irq, irq_type);
+		drm_dbg_vbl(crtc->dev, "Get crtc_irq ret=%d\n", rc);
+	} else {
+		rc = amdgpu_irq_put(adev, &adev->crtc_irq, irq_type);
+		drm_dbg_vbl(crtc->dev, "Put crtc_irq ret=%d\n", rc);
+	}
 
 	if (rc)
 		return rc;
 
-skip:
+	/*
+	 * hubp surface flip interrupt
+	 *
+	 * We have no guarantee that the frontend index maps to the same
+	 * backend index - some even map to more than one.
+	 *
+	 * TODO: Use a different interrupt or check DC itself for the mapping.
+	 */
+	if (enable) {
+		rc = amdgpu_irq_get(adev, &adev->pageflip_irq, irq_type);
+		drm_dbg_vbl(crtc->dev, "Get pageflip_irq ret=%d\n", rc);
+	} else {
+		rc = amdgpu_irq_put(adev, &adev->pageflip_irq, irq_type);
+		drm_dbg_vbl(crtc->dev, "Put pageflip_irq ret=%d\n", rc);
+	}
+
+	if (rc)
+		return rc;
+
+#if defined(CONFIG_DRM_AMD_SECURE_DISPLAY)
+	/* crtc vline0 interrupt, only available on DCN+ */
+	if (amdgpu_ip_version(adev, DCE_HWIP, 0) != 0) {
+		if (enable) {
+			rc = amdgpu_irq_get(adev, &adev->vline0_irq, irq_type);
+			drm_dbg_vbl(crtc->dev, "Get vline0_irq ret=%d\n", rc);
+		} else {
+			rc = amdgpu_irq_put(adev, &adev->vline0_irq, irq_type);
+			drm_dbg_vbl(crtc->dev, "Put vline0_irq ret=%d\n", rc);
+		}
+
+		if (rc)
+			return rc;
+	}
+#endif
+
 	if (amdgpu_in_reset(adev))
 		return 0;
 
@@ -304,6 +468,7 @@ static struct drm_crtc_state *amdgpu_dm_crtc_duplicate_state(struct drm_crtc *cr
 	state->regamma_tf = cur->regamma_tf;
 	state->crc_skip_count = cur->crc_skip_count;
 	state->mpo_requested = cur->mpo_requested;
+	state->cursor_mode = cur->cursor_mode;
 	/* TODO Duplicate dc_stream after objects are stream object is flattened */
 
 	return &state->base;
@@ -527,6 +692,15 @@ static int amdgpu_dm_crtc_helper_atomic_check(struct drm_crtc *crtc,
 		return -EINVAL;
 	}
 
+	if (!state->legacy_cursor_update && amdgpu_dm_crtc_vrr_active(dm_crtc_state)) {
+		struct drm_plane_state *primary_state;
+
+		/* Pull in primary plane for correct VRR handling */
+		primary_state = drm_atomic_get_plane_state(state, crtc->primary);
+		if (IS_ERR(primary_state))
+			return PTR_ERR(primary_state);
+	}
+
 	/* In some use cases, like reset, no stream is attached */
 	if (!dm_crtc_state->stream)
 		return 0;
@@ -551,7 +725,7 @@ int amdgpu_dm_crtc_init(struct amdgpu_display_manager *dm,
 {
 	struct amdgpu_crtc *acrtc = NULL;
 	struct drm_plane *cursor_plane;
-	bool is_dcn;
+	bool has_degamma;
 	int res = -ENOMEM;
 
 	cursor_plane = kzalloc(sizeof(*cursor_plane), GFP_KERNEL);
@@ -590,11 +764,18 @@ int amdgpu_dm_crtc_init(struct amdgpu_display_manager *dm,
 
 	dm->adev->mode_info.crtcs[crtc_index] = acrtc;
 
-	/* Don't enable DRM CRTC degamma property for DCE since it doesn't
-	 * support programmable degamma anywhere.
+	/* Don't enable DRM CRTC degamma property for
+	 * 1. Degamma is replaced by color pipeline.
+	 * 2. DCE since it doesn't support programmable degamma anywhere.
+	 * 3. DCN401 since pre-blending degamma LUT doesn't apply to cursor.
 	 */
-	is_dcn = dm->adev->dm.dc->caps.color.dpp.dcn_arch;
-	drm_crtc_enable_color_mgmt(&acrtc->base, is_dcn ? MAX_COLOR_LUT_ENTRIES : 0,
+	if (plane->color_pipeline_property)
+		has_degamma = false;
+	else
+		has_degamma = dm->adev->dm.dc->caps.color.dpp.dcn_arch &&
+			      dm->adev->dm.dc->ctx->dce_version != DCN_VERSION_4_01;
+
+	drm_crtc_enable_color_mgmt(&acrtc->base, has_degamma ? MAX_COLOR_LUT_ENTRIES : 0,
 				   true, MAX_COLOR_LUT_ENTRIES);
 
 	drm_mode_crtc_set_gamma_size(&acrtc->base, MAX_COLOR_LEGACY_LUT_ENTRIES);

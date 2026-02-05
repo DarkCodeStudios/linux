@@ -194,12 +194,13 @@ static void octeon_l2c_remove(struct platform_device *pdev)
 
 static struct platform_driver octeon_l2c_driver = {
 	.probe = octeon_l2c_probe,
-	.remove_new = octeon_l2c_remove,
+	.remove = octeon_l2c_remove,
 	.driver = {
 		   .name = "octeon_l2c_edac",
 	}
 };
 module_platform_driver(octeon_l2c_driver);
 
+MODULE_DESCRIPTION("Cavium Octeon Secondary Caches (L2C) EDAC driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ralf Baechle <ralf@linux-mips.org>");

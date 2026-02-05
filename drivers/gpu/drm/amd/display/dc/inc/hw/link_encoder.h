@@ -47,6 +47,7 @@ struct encoder_init_data {
 	enum hpd_source_id hpd_source;
 	/* TODO: in DAL2, here was pointer to EventManagerInterface */
 	struct graphics_object_id encoder;
+	enum engine_id analog_engine;
 	struct dc_context *ctx;
 	enum transmitter transmitter;
 };
@@ -83,6 +84,7 @@ struct link_encoder {
 	struct graphics_object_id connector;
 	uint32_t output_signals;
 	enum engine_id preferred_engine;
+	enum engine_id analog_engine;
 	struct encoder_feature_support features;
 	enum transmitter transmitter;
 	enum hpd_source_id hpd_source;
@@ -168,6 +170,14 @@ struct link_encoder_funcs {
 		struct link_encoder *enc,
 		enum encoder_type_select sel,
 		uint32_t hpo_inst);
+	void (*enable_dpia_output)(struct link_encoder *enc,
+		const struct dc_link_settings *link_settings,
+		uint8_t dpia_id,
+		uint8_t digmode,
+		uint8_t fec_rdy);
+	void (*disable_dpia_output)(struct link_encoder *link_enc,
+		uint8_t dpia_id,
+		uint8_t digmode);
 };
 
 /*

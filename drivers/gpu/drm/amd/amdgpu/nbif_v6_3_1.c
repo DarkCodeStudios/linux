@@ -21,13 +21,13 @@
  *
  */
 #include "amdgpu.h"
-#include "amdgpu_atombios.h"
 #include "nbif_v6_3_1.h"
 
 #include "nbif/nbif_6_3_1_offset.h"
 #include "nbif/nbif_6_3_1_sh_mask.h"
 #include "pcie/pcie_6_1_0_offset.h"
 #include "pcie/pcie_6_1_0_sh_mask.h"
+#include "ivsrcid/nbio/irqsrcs_nbif_7_4.h"
 #include <uapi/linux/kfd_ioctl.h>
 
 static void nbif_v6_3_1_remap_hdp_registers(struct amdgpu_device *adev)
@@ -315,6 +315,7 @@ static u32 nbif_v6_3_1_get_rom_offset(struct amdgpu_device *adev)
 static void nbif_v6_3_1_program_ltr(struct amdgpu_device *adev)
 {
 	uint32_t def, data;
+	u16 devctl2;
 
 	def = RREG32_SOC15(NBIO, 0, regRCC_EP_DEV0_0_EP_PCIE_TX_LTR_CNTL);
 	data = 0x35EB;
@@ -328,13 +329,15 @@ static void nbif_v6_3_1_program_ltr(struct amdgpu_device *adev)
 	if (def != data)
 		WREG32_SOC15(NBIO, 0, regRCC_STRAP0_RCC_BIF_STRAP2, data);
 
-	def = data = RREG32_SOC15(NBIO, 0, regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2);
+	pcie_capability_read_word(adev->pdev, PCI_EXP_DEVCTL2, &devctl2);
+
+	if (adev->pdev->ltr_path == (devctl2 & PCI_EXP_DEVCTL2_LTR_EN))
+		return;
+
 	if (adev->pdev->ltr_path)
-		data |= BIF_CFG_DEV0_EPF0_DEVICE_CNTL2__LTR_EN_MASK;
+		pcie_capability_set_word(adev->pdev, PCI_EXP_DEVCTL2, PCI_EXP_DEVCTL2_LTR_EN);
 	else
-		data &= ~BIF_CFG_DEV0_EPF0_DEVICE_CNTL2__LTR_EN_MASK;
-	if (def != data)
-		WREG32_SOC15(NBIO, 0, regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2, data);
+		pcie_capability_clear_word(adev->pdev, PCI_EXP_DEVCTL2, PCI_EXP_DEVCTL2_LTR_EN);
 }
 #endif
 
@@ -342,6 +345,7 @@ static void nbif_v6_3_1_program_aspm(struct amdgpu_device *adev)
 {
 #ifdef CONFIG_PCIEASPM
 	uint32_t def, data;
+	u16 devctl2, ltr;
 
 	def = data = RREG32_SOC15(PCIE, 0, regPCIE_LC_CNTL);
 	data &= ~PCIE_LC_CNTL__LC_L1_INACTIVITY_MASK;
@@ -371,12 +375,17 @@ static void nbif_v6_3_1_program_aspm(struct amdgpu_device *adev)
 	if (def != data)
 		WREG32_SOC15(NBIO, 0, regRCC_STRAP0_RCC_BIF_STRAP5, data);
 
-	def = data = RREG32_SOC15(NBIO, 0, regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2);
-	data &= ~BIF_CFG_DEV0_EPF0_DEVICE_CNTL2__LTR_EN_MASK;
+	pcie_capability_read_word(adev->pdev, PCI_EXP_DEVCTL2, &devctl2);
+	data = def = devctl2;
+	data &= ~PCI_EXP_DEVCTL2_LTR_EN;
 	if (def != data)
-		WREG32_SOC15(NBIO, 0, regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2, data);
+		pcie_capability_set_word(adev->pdev, PCI_EXP_DEVCTL2, (u16)data);
 
-	WREG32_SOC15(NBIO, 0, regBIF_CFG_DEV0_EPF0_PCIE_LTR_CAP, 0x10011001);
+	ltr = pci_find_ext_capability(adev->pdev, PCI_EXT_CAP_ID_LTR);
+
+	if (ltr) {
+		pci_write_config_dword(adev->pdev, ltr + PCI_LTR_MAX_SNOOP_LAT, 0x10011001);
+	}
 
 #if 0
 	/* regPSWUSP0_PCIE_LC_CNTL2 should be replace by PCIE_LC_CNTL2 or someone else ? */
@@ -424,6 +433,20 @@ static void nbif_v6_3_1_program_aspm(struct amdgpu_device *adev)
 #endif
 }
 
+#define MMIO_REG_HOLE_OFFSET (0x80000 - PAGE_SIZE)
+
+static void nbif_v6_3_1_set_reg_remap(struct amdgpu_device *adev)
+{
+	if (!amdgpu_sriov_vf(adev) && (PAGE_SIZE <= 4096)) {
+		adev->rmmio_remap.reg_offset = MMIO_REG_HOLE_OFFSET;
+		adev->rmmio_remap.bus_addr = adev->rmmio_base + MMIO_REG_HOLE_OFFSET;
+	} else {
+		adev->rmmio_remap.reg_offset = SOC15_REG_OFFSET(NBIO, 0,
+			regBIF_BX_PF0_HDP_MEM_COHERENCY_FLUSH_CNTL) << 2;
+		adev->rmmio_remap.bus_addr = 0;
+	}
+}
+
 const struct amdgpu_nbio_funcs nbif_v6_3_1_funcs = {
 	.get_hdp_flush_req_offset = nbif_v6_3_1_get_hdp_flush_req_offset,
 	.get_hdp_flush_done_offset = nbif_v6_3_1_get_hdp_flush_done_offset,
@@ -446,50 +469,86 @@ const struct amdgpu_nbio_funcs nbif_v6_3_1_funcs = {
 	.remap_hdp_registers = nbif_v6_3_1_remap_hdp_registers,
 	.get_rom_offset = nbif_v6_3_1_get_rom_offset,
 	.program_aspm = nbif_v6_3_1_program_aspm,
+	.set_reg_remap = nbif_v6_3_1_set_reg_remap,
 };
 
 
-static void nbif_v6_3_1_sriov_ih_doorbell_range(struct amdgpu_device *adev,
-						bool use_doorbell, int doorbell_index)
+static int nbif_v6_3_1_set_ras_err_event_athub_irq_state(struct amdgpu_device *adev,
+						       struct amdgpu_irq_src *src,
+						       unsigned type,
+						       enum amdgpu_interrupt_state state)
 {
+	/* The ras_controller_irq enablement should be done in psp bl when it
+	 * tries to enable ras feature. Driver only need to set the correct interrupt
+	 * vector for bare-metal and sriov use case respectively
+	 */
+	uint32_t bif_doorbell_int_cntl;
+
+	bif_doorbell_int_cntl = RREG32_SOC15(NBIO, 0, regBIF_BX0_BIF_DOORBELL_INT_CNTL);
+	bif_doorbell_int_cntl = REG_SET_FIELD(bif_doorbell_int_cntl,
+					      BIF_BX0_BIF_DOORBELL_INT_CNTL,
+					      RAS_ATHUB_ERR_EVENT_INTERRUPT_DISABLE,
+					      (state == AMDGPU_IRQ_STATE_ENABLE) ? 0 : 1);
+	WREG32_SOC15(NBIO, 0, regBIF_BX0_BIF_DOORBELL_INT_CNTL, bif_doorbell_int_cntl);
+
+	return 0;
 }
 
-static void nbif_v6_3_1_sriov_sdma_doorbell_range(struct amdgpu_device *adev,
-						  int instance, bool use_doorbell,
-						  int doorbell_index,
-						  int doorbell_size)
+static int nbif_v6_3_1_process_err_event_athub_irq(struct amdgpu_device *adev,
+						 struct amdgpu_irq_src *source,
+						 struct amdgpu_iv_entry *entry)
 {
+	/* By design, the ih cookie for err_event_athub_irq should be written
+	 * to bif ring. since bif ring is not enabled, just leave process callback
+	 * as a dummy one.
+	 */
+	return 0;
 }
 
-static void nbif_v6_3_1_sriov_vcn_doorbell_range(struct amdgpu_device *adev,
-						 bool use_doorbell,
-						 int doorbell_index, int instance)
+static const struct amdgpu_irq_src_funcs nbif_v6_3_1_ras_err_event_athub_irq_funcs = {
+	.set = nbif_v6_3_1_set_ras_err_event_athub_irq_state,
+	.process = nbif_v6_3_1_process_err_event_athub_irq,
+};
+
+static void nbif_v6_3_1_handle_ras_err_event_athub_intr_no_bifring(struct amdgpu_device *adev)
 {
+	uint32_t bif_doorbell_int_cntl;
+
+	bif_doorbell_int_cntl = RREG32_SOC15(NBIO, 0, regBIF_BX0_BIF_DOORBELL_INT_CNTL);
+	if (REG_GET_FIELD(bif_doorbell_int_cntl,
+			  BIF_BX0_BIF_DOORBELL_INT_CNTL,
+			  RAS_ATHUB_ERR_EVENT_INTERRUPT_STATUS)) {
+		/* driver has to clear the interrupt status when bif ring is disabled */
+		bif_doorbell_int_cntl = REG_SET_FIELD(bif_doorbell_int_cntl,
+						BIF_BX0_BIF_DOORBELL_INT_CNTL,
+						RAS_ATHUB_ERR_EVENT_INTERRUPT_CLEAR, 1);
+		WREG32_SOC15(NBIO, 0, regBIF_BX0_BIF_DOORBELL_INT_CNTL, bif_doorbell_int_cntl);
+		amdgpu_ras_global_ras_isr(adev);
+	}
 }
 
-static void nbif_v6_3_1_sriov_gc_doorbell_init(struct amdgpu_device *adev)
+static int nbif_v6_3_1_init_ras_err_event_athub_interrupt(struct amdgpu_device *adev)
 {
+	int r;
+
+	/* init the irq funcs */
+	adev->nbio.ras_err_event_athub_irq.funcs =
+		&nbif_v6_3_1_ras_err_event_athub_irq_funcs;
+	adev->nbio.ras_err_event_athub_irq.num_types = 1;
+
+	/* register ras err event athub interrupt
+	 * nbif v6_3_1 uses the same irq source as nbio v7_4
+	 */
+	r = amdgpu_irq_add_id(adev, SOC21_IH_CLIENTID_BIF,
+			      NBIF_7_4__SRCID__ERREVENT_ATHUB_INTERRUPT,
+			      &adev->nbio.ras_err_event_athub_irq);
+
+	return r;
 }
 
-const struct amdgpu_nbio_funcs nbif_v6_3_1_sriov_funcs = {
-	.get_hdp_flush_req_offset = nbif_v6_3_1_get_hdp_flush_req_offset,
-	.get_hdp_flush_done_offset = nbif_v6_3_1_get_hdp_flush_done_offset,
-	.get_pcie_index_offset = nbif_v6_3_1_get_pcie_index_offset,
-	.get_pcie_data_offset = nbif_v6_3_1_get_pcie_data_offset,
-	.get_rev_id = nbif_v6_3_1_get_rev_id,
-	.mc_access_enable = nbif_v6_3_1_mc_access_enable,
-	.get_memsize = nbif_v6_3_1_get_memsize,
-	.sdma_doorbell_range = nbif_v6_3_1_sriov_sdma_doorbell_range,
-	.vcn_doorbell_range = nbif_v6_3_1_sriov_vcn_doorbell_range,
-	.gc_doorbell_init = nbif_v6_3_1_sriov_gc_doorbell_init,
-	.enable_doorbell_aperture = nbif_v6_3_1_enable_doorbell_aperture,
-	.enable_doorbell_selfring_aperture = nbif_v6_3_1_enable_doorbell_selfring_aperture,
-	.ih_doorbell_range = nbif_v6_3_1_sriov_ih_doorbell_range,
-	.update_medium_grain_clock_gating = nbif_v6_3_1_update_medium_grain_clock_gating,
-	.update_medium_grain_light_sleep = nbif_v6_3_1_update_medium_grain_light_sleep,
-	.get_clockgating_state = nbif_v6_3_1_get_clockgating_state,
-	.ih_control = nbif_v6_3_1_ih_control,
-	.init_registers = nbif_v6_3_1_init_registers,
-	.remap_hdp_registers = nbif_v6_3_1_remap_hdp_registers,
-	.get_rom_offset = nbif_v6_3_1_get_rom_offset,
+struct amdgpu_nbio_ras nbif_v6_3_1_ras = {
+	.handle_ras_err_event_athub_intr_no_bifring =
+		nbif_v6_3_1_handle_ras_err_event_athub_intr_no_bifring,
+	.init_ras_err_event_athub_interrupt =
+		nbif_v6_3_1_init_ras_err_event_athub_interrupt,
 };

@@ -93,8 +93,7 @@ static int siox_gpio_probe(struct platform_device *pdev)
 
 	smaster = devm_siox_master_alloc(dev, sizeof(*ddata));
 	if (!smaster)
-		return dev_err_probe(dev, -ENOMEM,
-				     "failed to allocate siox master\n");
+		return -ENOMEM;
 
 	platform_set_drvdata(pdev, smaster);
 	ddata = siox_master_get_devdata(smaster);
@@ -148,5 +147,6 @@ static struct platform_driver siox_gpio_driver = {
 module_platform_driver(siox_gpio_driver);
 
 MODULE_AUTHOR("Uwe Kleine-Koenig <u.kleine-koenig@pengutronix.de>");
+MODULE_DESCRIPTION("SIOX GPIO bus driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRIVER_NAME);

@@ -14,7 +14,9 @@ xfs-y				+= xfs_trace.o
 
 # build the libxfs code first
 xfs-y				+= $(addprefix libxfs/, \
+				   xfs_group.o \
 				   xfs_ag.o \
+				   xfs_ag_resv.o \
 				   xfs_alloc.o \
 				   xfs_alloc_btree.o \
 				   xfs_attr.o \
@@ -40,13 +42,17 @@ xfs-y				+= $(addprefix libxfs/, \
 				   xfs_iext_tree.o \
 				   xfs_inode_fork.o \
 				   xfs_inode_buf.o \
+				   xfs_inode_util.o \
 				   xfs_log_rlimit.o \
-				   xfs_ag_resv.o \
+				   xfs_metadir.o \
+				   xfs_metafile.o \
 				   xfs_parent.o \
 				   xfs_rmap.o \
 				   xfs_rmap_btree.o \
 				   xfs_refcount.o \
 				   xfs_refcount_btree.o \
+				   xfs_rtrefcount_btree.o \
+				   xfs_rtrmap_btree.o \
 				   xfs_sb.o \
 				   xfs_symlink_remote.o \
 				   xfs_trans_inode.o \
@@ -57,6 +63,8 @@ xfs-y				+= $(addprefix libxfs/, \
 # xfs_rtbitmap is shared with libxfs
 xfs-$(CONFIG_XFS_RT)		+= $(addprefix libxfs/, \
 				   xfs_rtbitmap.o \
+				   xfs_rtgroup.o \
+				   xfs_zones.o \
 				   )
 
 # highlevel code
@@ -129,7 +137,11 @@ xfs-$(CONFIG_XFS_QUOTA)		+= xfs_dquot.o \
 				   xfs_quotaops.o
 
 # xfs_rtbitmap is shared with libxfs
-xfs-$(CONFIG_XFS_RT)		+= xfs_rtalloc.o
+xfs-$(CONFIG_XFS_RT)		+= xfs_rtalloc.o \
+				   xfs_zone_alloc.o \
+				   xfs_zone_gc.o \
+				   xfs_zone_info.o \
+				   xfs_zone_space_resv.o
 
 xfs-$(CONFIG_XFS_POSIX_ACL)	+= xfs_acl.o
 xfs-$(CONFIG_SYSCTL)		+= xfs_sysctl.o
@@ -170,6 +182,7 @@ xfs-y				+= $(addprefix scrub/, \
 				   inode.o \
 				   iscan.o \
 				   listxattr.o \
+				   metapath.o \
 				   nlinks.o \
 				   parent.o \
 				   readdir.o \
@@ -185,7 +198,10 @@ xfs-y				+= $(addprefix scrub/, \
 xfs-$(CONFIG_XFS_ONLINE_SCRUB_STATS) += scrub/stats.o
 
 xfs-$(CONFIG_XFS_RT)		+= $(addprefix scrub/, \
+				   rgsuper.o \
 				   rtbitmap.o \
+				   rtrefcount.o \
+				   rtrmap.o \
 				   rtsummary.o \
 				   )
 
@@ -225,6 +241,8 @@ xfs-y				+= $(addprefix scrub/, \
 
 xfs-$(CONFIG_XFS_RT)		+= $(addprefix scrub/, \
 				   rtbitmap_repair.o \
+				   rtrefcount_repair.o \
+				   rtrmap_repair.o \
 				   rtsummary_repair.o \
 				   )
 

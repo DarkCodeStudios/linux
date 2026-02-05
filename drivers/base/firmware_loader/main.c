@@ -806,42 +806,15 @@ static void fw_abort_batch_reqs(struct firmware *fw)
 }
 
 #if defined(CONFIG_FW_LOADER_DEBUG)
-#include <crypto/hash.h>
 #include <crypto/sha2.h>
 
 static void fw_log_firmware_info(const struct firmware *fw, const char *name, struct device *device)
 {
-	struct shash_desc *shash;
-	struct crypto_shash *alg;
-	u8 *sha256buf;
-	char *outbuf;
+	u8 digest[SHA256_DIGEST_SIZE];
 
-	alg = crypto_alloc_shash("sha256", 0, 0);
-	if (IS_ERR(alg))
-		return;
-
-	sha256buf = kmalloc(SHA256_DIGEST_SIZE, GFP_KERNEL);
-	outbuf = kmalloc(SHA256_BLOCK_SIZE + 1, GFP_KERNEL);
-	shash = kmalloc(sizeof(*shash) + crypto_shash_descsize(alg), GFP_KERNEL);
-	if (!sha256buf || !outbuf || !shash)
-		goto out_free;
-
-	shash->tfm = alg;
-
-	if (crypto_shash_digest(shash, fw->data, fw->size, sha256buf) < 0)
-		goto out_shash;
-
-	for (int i = 0; i < SHA256_DIGEST_SIZE; i++)
-		sprintf(&outbuf[i * 2], "%02x", sha256buf[i]);
-	outbuf[SHA256_BLOCK_SIZE] = 0;
-	dev_dbg(device, "Loaded FW: %s, sha256: %s\n", name, outbuf);
-
-out_shash:
-	crypto_free_shash(alg);
-out_free:
-	kfree(shash);
-	kfree(outbuf);
-	kfree(sha256buf);
+	sha256(fw->data, fw->size, digest);
+	dev_dbg(device, "Loaded FW: %s, sha256: %*phN\n",
+		name, SHA256_DIGEST_SIZE, digest);
 }
 #else
 static void fw_log_firmware_info(const struct firmware *fw, const char *name,
@@ -856,8 +829,6 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 		  size_t offset, u32 opt_flags)
 {
 	struct firmware *fw = NULL;
-	struct cred *kern_cred = NULL;
-	const struct cred *old_cred;
 	bool nondirect = false;
 	int ret;
 
@@ -865,6 +836,25 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 		return -EINVAL;
 
 	if (!name || name[0] == '\0') {
+		ret = -EINVAL;
+		goto out;
+	}
+
+
+	/*
+	 * Reject firmware file names with ".." path components.
+	 * There are drivers that construct firmware file names from
+	 * device-supplied strings, and we don't want some device to be
+	 * able to tell us "I would like to be sent my firmware from
+	 * ../../../etc/shadow, please".
+	 *
+	 * This intentionally only looks at the firmware name, not at
+	 * the firmware base directory or at symlink contents.
+	 */
+	if (name_contains_dotdot(name)) {
+		dev_warn(device,
+			 "Firmware load for '%s' refused, path contains '..' component\n",
+			 name);
 		ret = -EINVAL;
 		goto out;
 	}
@@ -879,45 +869,38 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 	 * called by a driver when serving an unrelated request from userland, we use
 	 * the kernel credentials to read the file.
 	 */
-	kern_cred = prepare_kernel_cred(&init_task);
-	if (!kern_cred) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	old_cred = override_creds(kern_cred);
+	scoped_with_kernel_creds() {
+		ret = fw_get_filesystem_firmware(device, fw->priv, "", NULL);
 
-	ret = fw_get_filesystem_firmware(device, fw->priv, "", NULL);
-
-	/* Only full reads can support decompression, platform, and sysfs. */
-	if (!(opt_flags & FW_OPT_PARTIAL))
-		nondirect = true;
+		/* Only full reads can support decompression, platform, and sysfs. */
+		if (!(opt_flags & FW_OPT_PARTIAL))
+			nondirect = true;
 
 #ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
-	if (ret == -ENOENT && nondirect)
-		ret = fw_get_filesystem_firmware(device, fw->priv, ".zst",
-						 fw_decompress_zstd);
+		if (ret == -ENOENT && nondirect)
+			ret = fw_get_filesystem_firmware(device, fw->priv, ".zst",
+							 fw_decompress_zstd);
 #endif
 #ifdef CONFIG_FW_LOADER_COMPRESS_XZ
-	if (ret == -ENOENT && nondirect)
-		ret = fw_get_filesystem_firmware(device, fw->priv, ".xz",
-						 fw_decompress_xz);
+		if (ret == -ENOENT && nondirect)
+			ret = fw_get_filesystem_firmware(device, fw->priv, ".xz",
+							 fw_decompress_xz);
 #endif
-	if (ret == -ENOENT && nondirect)
-		ret = firmware_fallback_platform(fw->priv);
+		if (ret == -ENOENT && nondirect)
+			ret = firmware_fallback_platform(fw->priv);
 
-	if (ret) {
-		if (!(opt_flags & FW_OPT_NO_WARN))
-			dev_warn(device,
-				 "Direct firmware load for %s failed with error %d\n",
-				 name, ret);
-		if (nondirect)
-			ret = firmware_fallback_sysfs(fw, name, device,
-						      opt_flags, ret);
-	} else
-		ret = assign_fw(fw, device);
-
-	revert_creds(old_cred);
-	put_cred(kern_cred);
+		if (ret) {
+			if (!(opt_flags & FW_OPT_NO_WARN))
+				dev_warn(device,
+					 "Direct firmware load for %s failed with error %d\n",
+					 name, ret);
+			if (nondirect)
+				ret = firmware_fallback_sysfs(fw, name, device,
+							      opt_flags, ret);
+		} else {
+			ret = assign_fw(fw, device);
+		}
+	}
 
 out:
 	if (ret < 0) {
@@ -946,6 +929,8 @@ out:
  *      @name will be used as $FIRMWARE in the uevent environment and
  *      should be distinctive enough not to be confused with any other
  *      firmware image for this or any other device.
+ *	It must not contain any ".." path components - "foo/bar..bin" is
+ *	allowed, but "foo/../bar.bin" is not.
  *
  *	Caller must hold the reference count of @device.
  *
@@ -1045,8 +1030,8 @@ EXPORT_SYMBOL_GPL(firmware_request_platform);
 
 /**
  * firmware_request_cache() - cache firmware for suspend so resume can use it
- * @name: name of firmware file
  * @device: device for which firmware should be cached for
+ * @name: name of firmware file
  *
  * There are some devices with an optimization that enables the device to not
  * require loading firmware on system reboot. This optimization may still
@@ -1172,6 +1157,49 @@ static void request_firmware_work_func(struct work_struct *work)
 	kfree(fw_work);
 }
 
+
+static int _request_firmware_nowait(
+	struct module *module, bool uevent,
+	const char *name, struct device *device, gfp_t gfp, void *context,
+	void (*cont)(const struct firmware *fw, void *context), bool nowarn)
+{
+	struct firmware_work *fw_work;
+
+	fw_work = kzalloc(sizeof(struct firmware_work), gfp);
+	if (!fw_work)
+		return -ENOMEM;
+
+	fw_work->module = module;
+	fw_work->name = kstrdup_const(name, gfp);
+	if (!fw_work->name) {
+		kfree(fw_work);
+		return -ENOMEM;
+	}
+	fw_work->device = device;
+	fw_work->context = context;
+	fw_work->cont = cont;
+	fw_work->opt_flags = FW_OPT_NOWAIT |
+		(uevent ? FW_OPT_UEVENT : FW_OPT_USERHELPER) |
+		(nowarn ? FW_OPT_NO_WARN : 0);
+
+	if (!uevent && fw_cache_is_setup(device, name)) {
+		kfree_const(fw_work->name);
+		kfree(fw_work);
+		return -EOPNOTSUPP;
+	}
+
+	if (!try_module_get(module)) {
+		kfree_const(fw_work->name);
+		kfree(fw_work);
+		return -EFAULT;
+	}
+
+	get_device(fw_work->device);
+	INIT_WORK(&fw_work->work, request_firmware_work_func);
+	schedule_work(&fw_work->work);
+	return 0;
+}
+
 /**
  * request_firmware_nowait() - asynchronous version of request_firmware
  * @module: module requesting the firmware
@@ -1195,48 +1223,41 @@ static void request_firmware_work_func(struct work_struct *work)
  *
  *		- can't sleep at all if @gfp is GFP_ATOMIC.
  **/
-int
-request_firmware_nowait(
+int request_firmware_nowait(
 	struct module *module, bool uevent,
 	const char *name, struct device *device, gfp_t gfp, void *context,
 	void (*cont)(const struct firmware *fw, void *context))
 {
-	struct firmware_work *fw_work;
+	return _request_firmware_nowait(module, uevent, name, device, gfp,
+					context, cont, false);
 
-	fw_work = kzalloc(sizeof(struct firmware_work), gfp);
-	if (!fw_work)
-		return -ENOMEM;
-
-	fw_work->module = module;
-	fw_work->name = kstrdup_const(name, gfp);
-	if (!fw_work->name) {
-		kfree(fw_work);
-		return -ENOMEM;
-	}
-	fw_work->device = device;
-	fw_work->context = context;
-	fw_work->cont = cont;
-	fw_work->opt_flags = FW_OPT_NOWAIT |
-		(uevent ? FW_OPT_UEVENT : FW_OPT_USERHELPER);
-
-	if (!uevent && fw_cache_is_setup(device, name)) {
-		kfree_const(fw_work->name);
-		kfree(fw_work);
-		return -EOPNOTSUPP;
-	}
-
-	if (!try_module_get(module)) {
-		kfree_const(fw_work->name);
-		kfree(fw_work);
-		return -EFAULT;
-	}
-
-	get_device(fw_work->device);
-	INIT_WORK(&fw_work->work, request_firmware_work_func);
-	schedule_work(&fw_work->work);
-	return 0;
 }
 EXPORT_SYMBOL(request_firmware_nowait);
+
+/**
+ * firmware_request_nowait_nowarn() - async version of request_firmware_nowarn
+ * @module: module requesting the firmware
+ * @name: name of firmware file
+ * @device: device for which firmware is being loaded
+ * @gfp: allocation flags
+ * @context: will be passed over to @cont, and
+ *	@fw may be %NULL if firmware request fails.
+ * @cont: function will be called asynchronously when the firmware
+ *	request is over.
+ *
+ * Similar in function to request_firmware_nowait(), but doesn't print a warning
+ * when the firmware file could not be found and always sends a uevent to copy
+ * the firmware image.
+ */
+int firmware_request_nowait_nowarn(
+	struct module *module, const char *name,
+	struct device *device, gfp_t gfp, void *context,
+	void (*cont)(const struct firmware *fw, void *context))
+{
+	return _request_firmware_nowait(module, FW_ACTION_UEVENT, name, device,
+					gfp, context, cont, true);
+}
+EXPORT_SYMBOL_GPL(firmware_request_nowait_nowarn);
 
 #ifdef CONFIG_FW_CACHE
 static ASYNC_DOMAIN_EXCLUSIVE(fw_cache_domain);
@@ -1555,14 +1576,18 @@ static int fw_pm_notify(struct notifier_block *notify_block,
 }
 
 /* stop caching firmware once syscore_suspend is reached */
-static int fw_suspend(void)
+static int fw_suspend(void *data)
 {
 	fw_cache.state = FW_LOADER_NO_CACHE;
 	return 0;
 }
 
-static struct syscore_ops fw_syscore_ops = {
+static const struct syscore_ops fw_syscore_ops = {
 	.suspend = fw_suspend,
+};
+
+static struct syscore fw_syscore = {
+	.ops = &fw_syscore_ops,
 };
 
 static int __init register_fw_pm_ops(void)
@@ -1580,14 +1605,14 @@ static int __init register_fw_pm_ops(void)
 	if (ret)
 		return ret;
 
-	register_syscore_ops(&fw_syscore_ops);
+	register_syscore(&fw_syscore);
 
 	return ret;
 }
 
 static inline void unregister_fw_pm_ops(void)
 {
-	unregister_syscore_ops(&fw_syscore_ops);
+	unregister_syscore(&fw_syscore);
 	unregister_pm_notifier(&fw_cache.pm_notify);
 }
 #else

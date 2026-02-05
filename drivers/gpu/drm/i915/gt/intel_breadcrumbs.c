@@ -8,6 +8,8 @@
 #include <trace/events/dma_fence.h>
 #include <uapi/linux/sched/types.h>
 
+#include <drm/drm_print.h>
+
 #include "i915_drv.h"
 #include "i915_trace.h"
 #include "intel_breadcrumbs.h"
@@ -70,7 +72,7 @@ static void __intel_breadcrumbs_disarm_irq(struct intel_breadcrumbs *b)
 	if (!--b->irq_enabled)
 		b->irq_disable(b);
 
-	WRITE_ONCE(b->irq_armed, 0);
+	WRITE_ONCE(b->irq_armed, NULL);
 	intel_gt_pm_put_async(b->irq_engine->gt, wakeref);
 }
 

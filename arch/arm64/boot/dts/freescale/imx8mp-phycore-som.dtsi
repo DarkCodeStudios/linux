@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 /*
  * Copyright (C) 2020 PHYTEC Messtechnik GmbH
- * Author: Teresa Remmet <t.remmet@phytec.de>
  */
 
 #include <dt-bindings/net/ti-dp83867.h>
@@ -19,6 +18,15 @@
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0 0x80000000>;
+	};
+
+	reg_vdd_io: regulator-vdd-io {
+		compatible = "regulator-fixed";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-max-microvolt = <3300000>;
+		regulator-min-microvolt = <3300000>;
+		regulator-name = "VDD_IO";
 	};
 };
 
@@ -170,6 +178,7 @@
 		compatible = "atmel,24c32";
 		reg = <0x51>;
 		pagesize = <32>;
+		vcc-supply = <&reg_vdd_io>;
 	};
 
 	rv3028: rtc@52 {
@@ -199,9 +208,7 @@
 };
 
 &gpio1 {
-	gpio-line-names = "", "", "X_PMIC_WDOG_B", "",
-		"", "", "", "", "", "",
-		"", "", "", "", "", "X_nETHPHY_INT";
+	gpio-line-names = "", "", "X_PMIC_WDOG_B";
 };
 
 &gpio4 {

@@ -33,10 +33,12 @@
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/workqueue.h>
 
 #include <asm/cacheflush.h>
 #include <asm/io.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
+#include <linux/string_choices.h>
 
 #define ATMCI_MAX_NR_SLOTS	2
 
@@ -272,12 +274,12 @@ struct atmel_mci_dma {
  *	EVENT_DATA_ERROR is pending.
  * @stop_cmdr: Value to be loaded into CMDR when the stop command is
  *	to be sent.
- * @tasklet: Tasklet running the request state machine.
+ * @bh_work: Work running the request state machine.
  * @pending_events: Bitmask of events flagged by the interrupt handler
- *	to be processed by the tasklet.
+ *	to be processed by the work.
  * @completed_events: Bitmask of events which the state machine has
  *	processed.
- * @state: Tasklet state.
+ * @state: Work state.
  * @queue: List of slots waiting for access to the controller.
  * @need_clock_update: Update the clock rate before the next request.
  * @need_reset: Reset controller before next request.
@@ -352,7 +354,7 @@ struct atmel_mci {
 	u32			data_status;
 	u32			stop_cmdr;
 
-	struct tasklet_struct	tasklet;
+	struct work_struct	bh_work;
 	unsigned long		pending_events;
 	unsigned long		completed_events;
 	enum atmel_mci_state	state;
@@ -540,7 +542,6 @@ static int atmci_regs_show(struct seq_file *s, void *v)
 	memcpy_fromio(buf, host->regs, ATMCI_REGS_SIZE);
 	spin_unlock_bh(&host->lock);
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	seq_printf(s, "MR:\t0x%08x%s%s ",
@@ -608,12 +609,12 @@ static void atmci_init_debugfs(struct atmel_mci_slot *slot)
 	if (!root)
 		return;
 
-	debugfs_create_file("regs", S_IRUSR, root, host, &atmci_regs_fops);
-	debugfs_create_file("req", S_IRUSR, root, slot, &atmci_req_fops);
-	debugfs_create_u32("state", S_IRUSR, root, &host->state);
-	debugfs_create_xul("pending_events", S_IRUSR, root,
+	debugfs_create_file("regs", 0400, root, host, &atmci_regs_fops);
+	debugfs_create_file("req", 0400, root, slot, &atmci_req_fops);
+	debugfs_create_u32("state", 0400, root, &host->state);
+	debugfs_create_xul("pending_events", 0400, root,
 			   &host->pending_events);
-	debugfs_create_xul("completed_events", S_IRUSR, root,
+	debugfs_create_xul("completed_events", 0400, root,
 			   &host->completed_events);
 }
 
@@ -713,7 +714,7 @@ static inline unsigned int atmci_convert_chksize(struct atmel_mci *host,
 
 static void atmci_timeout_timer(struct timer_list *t)
 {
-	struct atmel_mci *host = from_timer(host, t, timer);
+	struct atmel_mci *host = timer_container_of(host, t, timer);
 	struct device *dev = host->dev;
 
 	dev_dbg(dev, "software timeout\n");
@@ -735,7 +736,7 @@ static void atmci_timeout_timer(struct timer_list *t)
 	host->need_reset = 1;
 	host->state = STATE_END_REQUEST;
 	smp_wmb();
-	tasklet_schedule(&host->tasklet);
+	queue_work(system_bh_wq, &host->bh_work);
 }
 
 static inline unsigned int atmci_ns_to_clocks(struct atmel_mci *host,
@@ -859,7 +860,7 @@ static void atmci_send_stop_cmd(struct atmel_mci *host, struct mmc_data *data)
 }
 
 /*
- * Configure given PDC buffer taking care of alignement issues.
+ * Configure given PDC buffer taking care of alignment issues.
  * Update host->data_size and host->sg.
  */
 static void atmci_pdc_set_single_buf(struct atmel_mci *host,
@@ -958,7 +959,7 @@ static void atmci_pdc_complete(struct atmel_mci *host)
 
 	dev_dbg(dev, "(%s) set pending xfer complete\n", __func__);
 	atmci_set_pending(host, EVENT_XFER_COMPLETE);
-	tasklet_schedule(&host->tasklet);
+	queue_work(system_bh_wq, &host->bh_work);
 }
 
 static void atmci_dma_cleanup(struct atmel_mci *host)
@@ -972,7 +973,7 @@ static void atmci_dma_cleanup(struct atmel_mci *host)
 }
 
 /*
- * This function is called by the DMA driver from tasklet context.
+ * This function is called by the DMA driver from bh context.
  */
 static void atmci_dma_complete(void *arg)
 {
@@ -995,7 +996,7 @@ static void atmci_dma_complete(void *arg)
 	if (data) {
 		dev_dbg(dev, "(%s) set pending xfer complete\n", __func__);
 		atmci_set_pending(host, EVENT_XFER_COMPLETE);
-		tasklet_schedule(&host->tasklet);
+		queue_work(system_bh_wq, &host->bh_work);
 
 		/*
 		 * Regardless of what the documentation says, we have
@@ -1008,7 +1009,7 @@ static void atmci_dma_complete(void *arg)
 		 * haven't seen all the potential error bits yet.
 		 *
 		 * The interrupt handler will schedule a different
-		 * tasklet to finish things up when the data transfer
+		 * bh work to finish things up when the data transfer
 		 * is completely done.
 		 *
 		 * We may not complete the mmc request here anyway
@@ -1591,7 +1592,7 @@ static void atmci_request_end(struct atmel_mci *host, struct mmc_request *mrq)
 
 	WARN_ON(host->cmd || host->data);
 
-	del_timer(&host->timer);
+	timer_delete(&host->timer);
 
 	/*
 	 * Update the MMC clock rate if necessary. This may be
@@ -1651,7 +1652,8 @@ static void atmci_command_complete(struct atmel_mci *host,
 
 static void atmci_detect_change(struct timer_list *t)
 {
-	struct atmel_mci_slot	*slot = from_timer(slot, t, detect_timer);
+	struct atmel_mci_slot	*slot = timer_container_of(slot, t,
+								detect_timer);
 	bool			present;
 	bool			present_old;
 
@@ -1745,9 +1747,9 @@ static void atmci_detect_change(struct timer_list *t)
 	}
 }
 
-static void atmci_tasklet_func(struct tasklet_struct *t)
+static void atmci_work_func(struct work_struct *t)
 {
-	struct atmel_mci        *host = from_tasklet(host, t, tasklet);
+	struct atmel_mci        *host = from_work(host, t, bh_work);
 	struct mmc_request	*mrq = host->mrq;
 	struct mmc_data		*data = host->data;
 	struct device		*dev = host->dev;
@@ -1759,7 +1761,7 @@ static void atmci_tasklet_func(struct tasklet_struct *t)
 
 	state = host->state;
 
-	dev_vdbg(dev, "tasklet: state %u pending/completed/mask %lx/%lx/%x\n",
+	dev_vdbg(dev, "bh_work: state %u pending/completed/mask %lx/%lx/%x\n",
 		state, host->pending_events, host->completed_events,
 		atmci_readl(host, ATMCI_IMR));
 
@@ -2118,7 +2120,7 @@ static irqreturn_t atmci_interrupt(int irq, void *dev_id)
 			dev_dbg(dev, "set pending data error\n");
 			smp_wmb();
 			atmci_set_pending(host, EVENT_DATA_ERROR);
-			tasklet_schedule(&host->tasklet);
+			queue_work(system_bh_wq, &host->bh_work);
 		}
 
 		if (pending & ATMCI_TXBUFE) {
@@ -2187,7 +2189,7 @@ static irqreturn_t atmci_interrupt(int irq, void *dev_id)
 			smp_wmb();
 			dev_dbg(dev, "set pending notbusy\n");
 			atmci_set_pending(host, EVENT_NOTBUSY);
-			tasklet_schedule(&host->tasklet);
+			queue_work(system_bh_wq, &host->bh_work);
 		}
 
 		if (pending & ATMCI_NOTBUSY) {
@@ -2196,7 +2198,7 @@ static irqreturn_t atmci_interrupt(int irq, void *dev_id)
 			smp_wmb();
 			dev_dbg(dev, "set pending notbusy\n");
 			atmci_set_pending(host, EVENT_NOTBUSY);
-			tasklet_schedule(&host->tasklet);
+			queue_work(system_bh_wq, &host->bh_work);
 		}
 
 		if (pending & ATMCI_RXRDY)
@@ -2211,7 +2213,7 @@ static irqreturn_t atmci_interrupt(int irq, void *dev_id)
 			smp_wmb();
 			dev_dbg(dev, "set pending cmd rdy\n");
 			atmci_set_pending(host, EVENT_CMD_RDY);
-			tasklet_schedule(&host->tasklet);
+			queue_work(system_bh_wq, &host->bh_work);
 		}
 
 		if (pending & (ATMCI_SDIOIRQA | ATMCI_SDIOIRQB))
@@ -2246,7 +2248,7 @@ static int atmci_init_slot(struct atmel_mci *host,
 	struct atmel_mci_slot		*slot;
 	int ret;
 
-	mmc = mmc_alloc_host(sizeof(struct atmel_mci_slot), dev);
+	mmc = devm_mmc_alloc_host(dev, sizeof(*slot));
 	if (!mmc)
 		return -ENOMEM;
 
@@ -2262,7 +2264,7 @@ static int atmci_init_slot(struct atmel_mci *host,
 	        "slot[%u]: bus_width=%u, detect_pin=%d, "
 		"detect_is_active_high=%s, wp_pin=%d\n",
 		id, slot_data->bus_width, desc_to_gpio(slot_data->detect_pin),
-		!gpiod_is_active_low(slot_data->detect_pin) ? "true" : "false",
+		str_true_false(!gpiod_is_active_low(slot_data->detect_pin)),
 		desc_to_gpio(slot_data->wp_pin));
 
 	mmc->ops = &atmci_ops;
@@ -2319,10 +2321,8 @@ static int atmci_init_slot(struct atmel_mci *host,
 	host->slot[id] = slot;
 	mmc_regulator_get_supply(mmc);
 	ret = mmc_add_host(mmc);
-	if (ret) {
-		mmc_free_host(mmc);
+	if (ret)
 		return ret;
-	}
 
 	if (slot->detect_pin) {
 		timer_setup(&slot->detect_timer, atmci_detect_change, 0);
@@ -2356,11 +2356,10 @@ static void atmci_cleanup_slot(struct atmel_mci_slot *slot,
 
 	if (slot->detect_pin) {
 		free_irq(gpiod_to_irq(slot->detect_pin), slot);
-		del_timer_sync(&slot->detect_timer);
+		timer_delete_sync(&slot->detect_timer);
 	}
 
 	slot->host->slot[id] = NULL;
-	mmc_free_host(slot->mmc);
 }
 
 static int atmci_configure_dma(struct atmel_mci *host)
@@ -2487,7 +2486,7 @@ static int atmci_probe(struct platform_device *pdev)
 
 	host->mapbase = regs->start;
 
-	tasklet_setup(&host->tasklet, atmci_tasklet_func);
+	INIT_WORK(&host->bh_work, atmci_work_func);
 
 	ret = request_irq(irq, atmci_interrupt, 0, dev_name(dev), host);
 	if (ret) {
@@ -2498,8 +2497,10 @@ static int atmci_probe(struct platform_device *pdev)
 	/* Get MCI capabilities and set operations according to it */
 	atmci_get_cap(host);
 	ret = atmci_configure_dma(host);
-	if (ret == -EPROBE_DEFER)
+	if (ret == -EPROBE_DEFER) {
+		clk_disable_unprepare(host->mck);
 		goto err_dma_probe_defer;
+	}
 	if (ret == 0) {
 		host->prepare_data = &atmci_prepare_data_dma;
 		host->submit_data = &atmci_submit_data_dma;
@@ -2566,7 +2567,6 @@ static int atmci_probe(struct platform_device *pdev)
 	dev_info(dev, "Atmel MCI controller at 0x%08lx irq %d, %u slots\n",
 		 host->mapbase, irq, nr_slots);
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return 0;
@@ -2582,7 +2582,7 @@ err_init_slot:
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
 
-	del_timer_sync(&host->timer);
+	timer_delete_sync(&host->timer);
 	if (!IS_ERR(host->dma.chan))
 		dma_release_channel(host->dma.chan);
 err_dma_probe_defer:
@@ -2610,7 +2610,7 @@ static void atmci_remove(struct platform_device *pdev)
 	atmci_writel(host, ATMCI_CR, ATMCI_CR_MCIDIS);
 	atmci_readl(host, ATMCI_SR);
 
-	del_timer_sync(&host->timer);
+	timer_delete_sync(&host->timer);
 	if (!IS_ERR(host->dma.chan))
 		dma_release_channel(host->dma.chan);
 
@@ -2622,7 +2622,6 @@ static void atmci_remove(struct platform_device *pdev)
 	pm_runtime_put_noidle(dev);
 }
 
-#ifdef CONFIG_PM
 static int atmci_runtime_suspend(struct device *dev)
 {
 	struct atmel_mci *host = dev_get_drvdata(dev);
@@ -2642,22 +2641,20 @@ static int atmci_runtime_resume(struct device *dev)
 
 	return clk_prepare_enable(host->mck);
 }
-#endif
 
 static const struct dev_pm_ops atmci_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(atmci_runtime_suspend, atmci_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	RUNTIME_PM_OPS(atmci_runtime_suspend, atmci_runtime_resume, NULL)
 };
 
 static struct platform_driver atmci_driver = {
 	.probe		= atmci_probe,
-	.remove_new	= atmci_remove,
+	.remove		= atmci_remove,
 	.driver		= {
 		.name		= "atmel_mci",
 		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table	= atmci_dt_ids,
-		.pm		= &atmci_dev_pm_ops,
+		.pm		= pm_ptr(&atmci_dev_pm_ops),
 	},
 };
 module_platform_driver(atmci_driver);

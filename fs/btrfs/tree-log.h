@@ -8,8 +8,7 @@
 
 #include <linux/list.h>
 #include <linux/fs.h>
-#include "messages.h"
-#include "ctree.h"
+#include <linux/fscrypt.h>
 #include "transaction.h"
 
 struct inode;
@@ -37,7 +36,7 @@ struct btrfs_log_ctx {
 	bool logging_new_delayed_dentries;
 	/* Indicate if the inode being logged was logged before. */
 	bool logged_before;
-	struct inode *inode;
+	struct btrfs_inode *inode;
 	struct list_head list;
 	/* Only used for fast fsyncs. */
 	struct list_head ordered_extents;
@@ -55,7 +54,7 @@ struct btrfs_log_ctx {
 	struct extent_buffer *scratch_eb;
 };
 
-void btrfs_init_log_ctx(struct btrfs_log_ctx *ctx, struct inode *inode);
+void btrfs_init_log_ctx(struct btrfs_log_ctx *ctx, struct btrfs_inode *inode);
 void btrfs_init_log_ctx_scratch_eb(struct btrfs_log_ctx *ctx);
 void btrfs_release_log_ctx_extents(struct btrfs_log_ctx *ctx);
 
@@ -80,13 +79,12 @@ int btrfs_log_dentry_safe(struct btrfs_trans_handle *trans,
 			  struct dentry *dentry,
 			  struct btrfs_log_ctx *ctx);
 void btrfs_del_dir_entries_in_log(struct btrfs_trans_handle *trans,
-				  struct btrfs_root *root,
 				  const struct fscrypt_str *name,
 				  struct btrfs_inode *dir, u64 index);
 void btrfs_del_inode_ref_in_log(struct btrfs_trans_handle *trans,
-				struct btrfs_root *root,
 				const struct fscrypt_str *name,
-				struct btrfs_inode *inode, u64 dirid);
+				struct btrfs_inode *inode,
+				struct btrfs_inode *dir);
 void btrfs_end_log_trans(struct btrfs_root *root);
 void btrfs_pin_log_trans(struct btrfs_root *root);
 void btrfs_record_unlink_dir(struct btrfs_trans_handle *trans,
@@ -94,6 +92,8 @@ void btrfs_record_unlink_dir(struct btrfs_trans_handle *trans,
 			     bool for_rename);
 void btrfs_record_snapshot_destroy(struct btrfs_trans_handle *trans,
 				   struct btrfs_inode *dir);
+void btrfs_record_new_subvolume(const struct btrfs_trans_handle *trans,
+				struct btrfs_inode *dir);
 void btrfs_log_new_name(struct btrfs_trans_handle *trans,
 			struct dentry *old_dentry, struct btrfs_inode *old_dir,
 			u64 old_dir_index, struct dentry *parent);

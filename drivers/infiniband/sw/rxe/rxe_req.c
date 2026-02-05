@@ -5,7 +5,6 @@
  */
 
 #include <linux/skbuff.h>
-#include <crypto/hash.h>
 
 #include "rxe.h"
 #include "rxe_loc.h"
@@ -98,7 +97,7 @@ static void req_retry(struct rxe_qp *qp)
 
 void rnr_nak_timer(struct timer_list *t)
 {
-	struct rxe_qp *qp = from_timer(qp, t, rnr_nak_timer);
+	struct rxe_qp *qp = timer_container_of(qp, t, rnr_nak_timer);
 	unsigned long flags;
 
 	rxe_dbg_qp(qp, "nak timer fired\n");
@@ -424,7 +423,7 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
 	int			paylen;
 	int			solicited;
 	u32			qp_num;
-	int			ack_req;
+	int			ack_req = 0;
 
 	/* length from start of bth to end of icrc */
 	paylen = rxe_opcode[opcode].length + payload + pad + RXE_ICRC_SIZE;
@@ -445,8 +444,9 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
 	qp_num = (pkt->mask & RXE_DETH_MASK) ? ibwr->wr.ud.remote_qpn :
 					 qp->attr.dest_qp_num;
 
-	ack_req = ((pkt->mask & RXE_END_MASK) ||
-		(qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK));
+	if (qp_type(qp) != IB_QPT_UD && qp_type(qp) != IB_QPT_UC)
+		ack_req = ((pkt->mask & RXE_END_MASK) ||
+			   (qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK));
 	if (ack_req)
 		qp->req.noack_pkts = 0;
 
@@ -662,10 +662,12 @@ int rxe_requester(struct rxe_qp *qp)
 	if (unlikely(qp_state(qp) == IB_QPS_ERR)) {
 		wqe = __req_next_wqe(qp);
 		spin_unlock_irqrestore(&qp->state_lock, flags);
-		if (wqe)
+		if (wqe) {
+			wqe->status = IB_WC_WR_FLUSH_ERR;
 			goto err;
-		else
+		} else {
 			goto exit;
+		}
 	}
 
 	if (unlikely(qp_state(qp) == IB_QPS_RESET)) {

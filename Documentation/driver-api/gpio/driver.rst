@@ -69,9 +69,8 @@ driver code:
 
 The code implementing a gpio_chip should support multiple instances of the
 controller, preferably using the driver model. That code will configure each
-gpio_chip and issue gpiochip_add(), gpiochip_add_data(), or
-devm_gpiochip_add_data().  Removing a GPIO controller should be rare; use
-gpiochip_remove() when it is unavoidable.
+gpio_chip and issue gpiochip_add_data() or devm_gpiochip_add_data(). Removing
+a GPIO controller should be rare; use gpiochip_remove() when it is unavoidable.
 
 Often a gpio_chip is part of an instance-specific structure with states not
 exposed by the GPIO interfaces, such as addressing, power management, and more.
@@ -751,7 +750,7 @@ compliance:
 - Test your driver with the appropriate in-kernel real-time test cases for both
   level and edge IRQs
 
-* [1] http://www.spinics.net/lists/linux-omap/msg120425.html
+* [1] https://lore.kernel.org/r/1437496011-11486-1-git-send-email-bigeasy@linutronix.de/
 * [2] https://lore.kernel.org/r/1443209283-20781-2-git-send-email-grygorii.strashko@ti.com
 * [3] https://lore.kernel.org/r/1443209283-20781-3-git-send-email-grygorii.strashko@ti.com
 

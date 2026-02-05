@@ -6,6 +6,7 @@
 #include <linux/memory.h>
 #include <linux/memory-tiers.h>
 #include <linux/notifier.h>
+#include <linux/sched/sysctl.h>
 
 #include "internal.h"
 
@@ -43,11 +44,30 @@ static LIST_HEAD(memory_tiers);
 static LIST_HEAD(default_memory_types);
 static struct node_memory_type_map node_memory_types[MAX_NUMNODES];
 struct memory_dev_type *default_dram_type;
+nodemask_t default_dram_nodes __initdata = NODE_MASK_NONE;
 
 static const struct bus_type memory_tier_subsys = {
 	.name = "memory_tiering",
 	.dev_name = "memory_tier",
 };
+
+#ifdef CONFIG_NUMA_BALANCING
+/**
+ * folio_use_access_time - check if a folio reuses cpupid for page access time
+ * @folio: folio to check
+ *
+ * folio's _last_cpupid field is repurposed by memory tiering. In memory
+ * tiering mode, cpupid of slow memory folio (not toptier memory) is used to
+ * record page access time.
+ *
+ * Return: the folio _last_cpupid is used to record page access time
+ */
+bool folio_use_access_time(struct folio *folio)
+{
+	return (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+	       !node_is_toptier(folio_nid(folio));
+}
+#endif
 
 #ifdef CONFIG_MIGRATION
 static int top_tier_adistance;
@@ -499,7 +519,7 @@ static inline void __init_node_memory_type(int node, struct memory_dev_type *mem
 	 * for each device getting added in the same NUMA node
 	 * with this specific memtype, bump the map count. We
 	 * Only take memtype device reference once, so that
-	 * changing a node memtype can be done by droping the
+	 * changing a node memtype can be done by dropping the
 	 * only reference count taken here.
 	 */
 
@@ -671,28 +691,35 @@ EXPORT_SYMBOL_GPL(mt_put_memory_types);
 
 /*
  * This is invoked via `late_initcall()` to initialize memory tiers for
- * CPU-less memory nodes after driver initialization, which is
- * expected to provide `adistance` algorithms.
+ * memory nodes, both with and without CPUs. After the initialization of
+ * firmware and devices, adistance algorithms are expected to be provided.
  */
 static int __init memory_tier_late_init(void)
 {
 	int nid;
+	struct memory_tier *memtier;
 
+	get_online_mems();
 	guard(mutex)(&memory_tier_lock);
+
+	/* Assign each uninitialized N_MEMORY node to a memory tier. */
 	for_each_node_state(nid, N_MEMORY) {
 		/*
-		 * Some device drivers may have initialized memory tiers
-		 * between `memory_tier_init()` and `memory_tier_late_init()`,
-		 * potentially bringing online memory nodes and
-		 * configuring memory tiers. Exclude them here.
+		 * Some device drivers may have initialized
+		 * memory tiers, potentially bringing memory nodes
+		 * online and configuring memory tiers.
+		 * Exclude them here.
 		 */
 		if (node_memory_types[nid].memtype)
 			continue;
 
-		set_node_memory_tier(nid);
+		memtier = set_node_memory_tier(nid);
+		if (IS_ERR(memtier))
+			continue;
 	}
 
 	establish_demotion_targets();
+	put_online_mems();
 
 	return 0;
 }
@@ -741,10 +768,10 @@ int mt_set_default_dram_perf(int nid, struct access_coordinate *perf,
 		pr_info(
 "memory-tiers: the performance of DRAM node %d mismatches that of the reference\n"
 "DRAM node %d.\n", nid, default_dram_perf_ref_nid);
-		pr_info("  performance of reference DRAM node %d:\n",
-			default_dram_perf_ref_nid);
+		pr_info("  performance of reference DRAM node %d from %s:\n",
+			default_dram_perf_ref_nid, default_dram_perf_ref_source);
 		dump_hmem_attrs(&default_dram_perf, "    ");
-		pr_info("  performance of DRAM node %d:\n", nid);
+		pr_info("  performance of DRAM node %d from %s:\n", nid, source);
 		dump_hmem_attrs(perf, "    ");
 		pr_info(
 "  disable default DRAM node performance based abstract distance algorithm.\n");
@@ -845,25 +872,18 @@ static int __meminit memtier_hotplug_callback(struct notifier_block *self,
 					      unsigned long action, void *_arg)
 {
 	struct memory_tier *memtier;
-	struct memory_notify *arg = _arg;
-
-	/*
-	 * Only update the node migration order when a node is
-	 * changing status, like online->offline.
-	 */
-	if (arg->status_change_nid < 0)
-		return notifier_from_errno(0);
+	struct node_notify *nn = _arg;
 
 	switch (action) {
-	case MEM_OFFLINE:
+	case NODE_REMOVED_LAST_MEMORY:
 		mutex_lock(&memory_tier_lock);
-		if (clear_node_memory_tier(arg->status_change_nid))
+		if (clear_node_memory_tier(nn->nid))
 			establish_demotion_targets();
 		mutex_unlock(&memory_tier_lock);
 		break;
-	case MEM_ONLINE:
+	case NODE_ADDED_FIRST_MEMORY:
 		mutex_lock(&memory_tier_lock);
-		memtier = set_node_memory_tier(arg->status_change_nid);
+		memtier = set_node_memory_tier(nn->nid);
 		if (!IS_ERR(memtier))
 			establish_demotion_targets();
 		mutex_unlock(&memory_tier_lock);
@@ -875,8 +895,7 @@ static int __meminit memtier_hotplug_callback(struct notifier_block *self,
 
 static int __init memory_tier_init(void)
 {
-	int ret, node;
-	struct memory_tier *memtier;
+	int ret;
 
 	ret = subsys_virtual_register(&memory_tier_subsys, NULL);
 	if (ret)
@@ -887,6 +906,7 @@ static int __init memory_tier_init(void)
 				GFP_KERNEL);
 	WARN_ON(!node_demotion);
 #endif
+
 	mutex_lock(&memory_tier_lock);
 	/*
 	 * For now we can have 4 faster memory tiers with smaller adistance
@@ -894,34 +914,15 @@ static int __init memory_tier_init(void)
 	 */
 	default_dram_type = mt_find_alloc_memory_type(MEMTIER_ADISTANCE_DRAM,
 						      &default_memory_types);
+	mutex_unlock(&memory_tier_lock);
 	if (IS_ERR(default_dram_type))
 		panic("%s() failed to allocate default DRAM tier\n", __func__);
 
-	/*
-	 * Look at all the existing N_MEMORY nodes and add them to
-	 * default memory tier or to a tier if we already have memory
-	 * types assigned.
-	 */
-	for_each_node_state(node, N_MEMORY) {
-		if (!node_state(node, N_CPU))
-			/*
-			 * Defer memory tier initialization on
-			 * CPUless numa nodes. These will be initialized
-			 * after firmware and devices are initialized.
-			 */
-			continue;
+	/* Record nodes with memory and CPU to set default DRAM performance. */
+	nodes_and(default_dram_nodes, node_states[N_MEMORY],
+		  node_states[N_CPU]);
 
-		memtier = set_node_memory_tier(node);
-		if (IS_ERR(memtier))
-			/*
-			 * Continue with memtiers we are able to setup
-			 */
-			break;
-	}
-	establish_demotion_targets();
-	mutex_unlock(&memory_tier_lock);
-
-	hotplug_memory_notifier(memtier_hotplug_callback, MEMTIER_HOTPLUG_PRI);
+	hotplug_node_notifier(memtier_hotplug_callback, MEMTIER_HOTPLUG_PRI);
 	return 0;
 }
 subsys_initcall(memory_tier_init);
@@ -933,8 +934,7 @@ bool numa_demotion_enabled = false;
 static ssize_t demotion_enabled_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%s\n",
-			  numa_demotion_enabled ? "true" : "false");
+	return sysfs_emit(buf, "%s\n", str_true_false(numa_demotion_enabled));
 }
 
 static ssize_t demotion_enabled_store(struct kobject *kobj,
@@ -942,10 +942,22 @@ static ssize_t demotion_enabled_store(struct kobject *kobj,
 				      const char *buf, size_t count)
 {
 	ssize_t ret;
+	bool before = numa_demotion_enabled;
 
 	ret = kstrtobool(buf, &numa_demotion_enabled);
 	if (ret)
 		return ret;
+
+	/*
+	 * Reset kswapd_failures statistics. They may no longer be
+	 * valid since the policy for kswapd has changed.
+	 */
+	if (before == false && numa_demotion_enabled == true) {
+		struct pglist_data *pgdat;
+
+		for_each_online_pgdat(pgdat)
+			atomic_set(&pgdat->kswapd_failures, 0);
+	}
 
 	return count;
 }

@@ -62,7 +62,7 @@ struct inode *efs_iget(struct super_block *super, unsigned long ino)
 	inode = iget_locked(super, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	in = INODE_INFO(inode);
@@ -311,4 +311,5 @@ efs_block_t efs_map_block(struct inode *inode, efs_block_t block) {
 	return 0;
 }  
 
+MODULE_DESCRIPTION("Extent File System (efs)");
 MODULE_LICENSE("GPL");

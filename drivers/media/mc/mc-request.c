@@ -6,7 +6,7 @@
  * Copyright (C) 2018 Intel Corporation
  * Copyright (C) 2018 Google, Inc.
  *
- * Author: Hans Verkuil <hans.verkuil@cisco.com>
+ * Author: Hans Verkuil <hverkuil@kernel.org>
  * Author: Sakari Ailus <sakari.ailus@linux.intel.com>
  */
 
@@ -246,22 +246,21 @@ static const struct file_operations request_fops = {
 struct media_request *
 media_request_get_by_fd(struct media_device *mdev, int request_fd)
 {
-	struct fd f;
 	struct media_request *req;
 
 	if (!mdev || !mdev->ops ||
 	    !mdev->ops->req_validate || !mdev->ops->req_queue)
 		return ERR_PTR(-EBADR);
 
-	f = fdget(request_fd);
-	if (!f.file)
-		goto err_no_req_fd;
+	CLASS(fd, f)(request_fd);
+	if (fd_empty(f))
+		goto err;
 
-	if (f.file->f_op != &request_fops)
-		goto err_fput;
-	req = f.file->private_data;
+	if (fd_file(f)->f_op != &request_fops)
+		goto err;
+	req = fd_file(f)->private_data;
 	if (req->mdev != mdev)
-		goto err_fput;
+		goto err;
 
 	/*
 	 * Note: as long as someone has an open filehandle of the request,
@@ -272,14 +271,9 @@ media_request_get_by_fd(struct media_device *mdev, int request_fd)
 	 * before media_request_get() is called.
 	 */
 	media_request_get(req);
-	fdput(f);
-
 	return req;
 
-err_fput:
-	fdput(f);
-
-err_no_req_fd:
+err:
 	dev_dbg(mdev->dev, "cannot find request_fd %d\n", request_fd);
 	return ERR_PTR(-EINVAL);
 }
@@ -288,8 +282,6 @@ EXPORT_SYMBOL_GPL(media_request_get_by_fd);
 int media_request_alloc(struct media_device *mdev, int *alloc_fd)
 {
 	struct media_request *req;
-	struct file *filp;
-	int fd;
 	int ret;
 
 	/* Either both are NULL or both are non-NULL */
@@ -303,19 +295,6 @@ int media_request_alloc(struct media_device *mdev, int *alloc_fd)
 	if (!req)
 		return -ENOMEM;
 
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0) {
-		ret = fd;
-		goto err_free_req;
-	}
-
-	filp = anon_inode_getfile("request", &request_fops, NULL, O_CLOEXEC);
-	if (IS_ERR(filp)) {
-		ret = PTR_ERR(filp);
-		goto err_put_fd;
-	}
-
-	filp->private_data = req;
 	req->mdev = mdev;
 	req->state = MEDIA_REQUEST_STATE_IDLE;
 	req->num_incomplete_objects = 0;
@@ -326,18 +305,23 @@ int media_request_alloc(struct media_device *mdev, int *alloc_fd)
 	req->updating_count = 0;
 	req->access_count = 0;
 
-	*alloc_fd = fd;
+	FD_PREPARE(fdf, O_CLOEXEC,
+		   anon_inode_getfile("request", &request_fops, NULL,
+				      O_CLOEXEC));
+	if (fdf.err) {
+		ret = fdf.err;
+		goto err_free_req;
+	}
+
+	fd_prepare_file(fdf)->private_data = req;
 
 	snprintf(req->debug_str, sizeof(req->debug_str), "%u:%d",
-		 atomic_inc_return(&mdev->request_id), fd);
+		 atomic_inc_return(&mdev->request_id), fd_prepare_fd(fdf));
 	dev_dbg(mdev->dev, "request: allocated %s\n", req->debug_str);
 
-	fd_install(fd, filp);
+	*alloc_fd = fd_publish(fdf);
 
 	return 0;
-
-err_put_fd:
-	put_unused_fd(fd);
 
 err_free_req:
 	if (mdev->ops->req_free)

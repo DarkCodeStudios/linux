@@ -10,10 +10,13 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/reset-controller.h>
+#include <linux/mfd/syscon.h>
 
 #define RESET			0x000
+#define VBENCTL			0x03c
 
 #define RESET_SEL_PLLRESET	BIT(12)
 #define RESET_PLLRESET		BIT(8)
@@ -32,6 +35,7 @@ struct rzg2l_usbphy_ctrl_priv {
 	struct reset_controller_dev rcdev;
 	struct reset_control *rstc;
 	void __iomem *base;
+	struct platform_device *vdev;
 
 	spinlock_t lock;
 };
@@ -88,8 +92,14 @@ static int rzg2l_usbphy_ctrl_status(struct reset_controller_dev *rcdev,
 	return !!(readl(priv->base + RESET) & port_mask);
 }
 
+#define RZG2L_USBPHY_CTRL_PWRRDY	1
+
 static const struct of_device_id rzg2l_usbphy_ctrl_match_table[] = {
 	{ .compatible = "renesas,rzg2l-usbphy-ctrl" },
+	{
+		.compatible = "renesas,r9a08g045-usbphy-ctrl",
+		.data = (void *)RZG2L_USBPHY_CTRL_PWRRDY
+	},
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, rzg2l_usbphy_ctrl_match_table);
@@ -100,10 +110,68 @@ static const struct reset_control_ops rzg2l_usbphy_ctrl_reset_ops = {
 	.status = rzg2l_usbphy_ctrl_status,
 };
 
+static const struct regmap_config rzg2l_usb_regconf = {
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.max_register = 1,
+};
+
+static void rzg2l_usbphy_ctrl_set_pwrrdy(struct regmap_field *pwrrdy,
+					 bool power_on)
+{
+	u32 val = power_on ? 0 : 1;
+
+	/* The initialization path guarantees that the mask is 1 bit long. */
+	regmap_field_update_bits(pwrrdy, 1, val);
+}
+
+static void rzg2l_usbphy_ctrl_pwrrdy_off(void *data)
+{
+	rzg2l_usbphy_ctrl_set_pwrrdy(data, false);
+}
+
+static int rzg2l_usbphy_ctrl_pwrrdy_init(struct device *dev)
+{
+	struct regmap_field *pwrrdy;
+	struct reg_field field;
+	struct regmap *regmap;
+	const int *data;
+	u32 args[2];
+
+	data = device_get_match_data(dev);
+	if ((uintptr_t)data != RZG2L_USBPHY_CTRL_PWRRDY)
+		return 0;
+
+	regmap = syscon_regmap_lookup_by_phandle_args(dev->of_node,
+						      "renesas,sysc-pwrrdy",
+						      ARRAY_SIZE(args), args);
+	if (IS_ERR(regmap))
+		return PTR_ERR(regmap);
+
+	/* Don't allow more than one bit in mask. */
+	if (hweight32(args[1]) != 1)
+		return -EINVAL;
+
+	field.reg = args[0];
+	field.lsb = __ffs(args[1]);
+	field.msb = __fls(args[1]);
+
+	pwrrdy = devm_regmap_field_alloc(dev, regmap, field);
+	if (IS_ERR(pwrrdy))
+		return PTR_ERR(pwrrdy);
+
+	rzg2l_usbphy_ctrl_set_pwrrdy(pwrrdy, true);
+
+	return devm_add_action_or_reset(dev, rzg2l_usbphy_ctrl_pwrrdy_off, pwrrdy);
+}
+
 static int rzg2l_usbphy_ctrl_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct rzg2l_usbphy_ctrl_priv *priv;
+	struct platform_device *vdev;
+	struct regmap *regmap;
 	unsigned long flags;
 	int error;
 	u32 val;
@@ -116,6 +184,14 @@ static int rzg2l_usbphy_ctrl_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
+	regmap = devm_regmap_init_mmio(dev, priv->base + VBENCTL, &rzg2l_usb_regconf);
+	if (IS_ERR(regmap))
+		return PTR_ERR(regmap);
+
+	error = rzg2l_usbphy_ctrl_pwrrdy_init(dev);
+	if (error)
+		return error;
+
 	priv->rstc = devm_reset_control_get_exclusive(&pdev->dev, NULL);
 	if (IS_ERR(priv->rstc))
 		return dev_err_probe(dev, PTR_ERR(priv->rstc),
@@ -125,25 +201,14 @@ static int rzg2l_usbphy_ctrl_probe(struct platform_device *pdev)
 	if (error)
 		return error;
 
-	priv->rcdev.ops = &rzg2l_usbphy_ctrl_reset_ops;
-	priv->rcdev.of_reset_n_cells = 1;
-	priv->rcdev.nr_resets = NUM_PORTS;
-	priv->rcdev.of_node = dev->of_node;
-	priv->rcdev.dev = dev;
-
-	error = devm_reset_controller_register(dev, &priv->rcdev);
-	if (error)
-		return error;
-
 	spin_lock_init(&priv->lock);
 	dev_set_drvdata(dev, priv);
 
 	pm_runtime_enable(&pdev->dev);
 	error = pm_runtime_resume_and_get(&pdev->dev);
 	if (error < 0) {
-		pm_runtime_disable(&pdev->dev);
-		reset_control_assert(priv->rstc);
-		return dev_err_probe(&pdev->dev, error, "pm_runtime_resume_and_get failed");
+		dev_err_probe(&pdev->dev, error, "pm_runtime_resume_and_get failed");
+		goto err_pm_disable_reset_deassert;
 	}
 
 	/* put pll and phy into reset state */
@@ -153,18 +218,49 @@ static int rzg2l_usbphy_ctrl_probe(struct platform_device *pdev)
 	writel(val, priv->base + RESET);
 	spin_unlock_irqrestore(&priv->lock, flags);
 
+	priv->rcdev.ops = &rzg2l_usbphy_ctrl_reset_ops;
+	priv->rcdev.of_reset_n_cells = 1;
+	priv->rcdev.nr_resets = NUM_PORTS;
+	priv->rcdev.of_node = dev->of_node;
+	priv->rcdev.dev = dev;
+
+	error = devm_reset_controller_register(dev, &priv->rcdev);
+	if (error)
+		goto err_pm_runtime_put;
+
+	vdev = platform_device_alloc("rzg2l-usb-vbus-regulator", pdev->id);
+	if (!vdev) {
+		error = -ENOMEM;
+		goto err_pm_runtime_put;
+	}
+	vdev->dev.parent = dev;
+	priv->vdev = vdev;
+
+	device_set_of_node_from_dev(&vdev->dev, dev);
+	error = platform_device_add(vdev);
+	if (error)
+		goto err_device_put;
+
 	return 0;
+
+err_device_put:
+	platform_device_put(vdev);
+err_pm_runtime_put:
+	pm_runtime_put(&pdev->dev);
+err_pm_disable_reset_deassert:
+	pm_runtime_disable(&pdev->dev);
+	reset_control_assert(priv->rstc);
+	return error;
 }
 
-static int rzg2l_usbphy_ctrl_remove(struct platform_device *pdev)
+static void rzg2l_usbphy_ctrl_remove(struct platform_device *pdev)
 {
 	struct rzg2l_usbphy_ctrl_priv *priv = dev_get_drvdata(&pdev->dev);
 
+	platform_device_unregister(priv->vdev);
 	pm_runtime_put(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	reset_control_assert(priv->rstc);
-
-	return 0;
 }
 
 static struct platform_driver rzg2l_usbphy_ctrl_driver = {
@@ -173,7 +269,7 @@ static struct platform_driver rzg2l_usbphy_ctrl_driver = {
 		.of_match_table	= rzg2l_usbphy_ctrl_match_table,
 	},
 	.probe	= rzg2l_usbphy_ctrl_probe,
-	.remove	= rzg2l_usbphy_ctrl_remove,
+	.remove = rzg2l_usbphy_ctrl_remove,
 };
 module_platform_driver(rzg2l_usbphy_ctrl_driver);
 

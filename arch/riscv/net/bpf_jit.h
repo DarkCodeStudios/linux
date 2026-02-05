@@ -13,14 +13,13 @@
 #include <linux/filter.h>
 #include <asm/cacheflush.h>
 
+/* verify runtime detection extension status */
+#define rv_ext_enabled(ext) \
+	(IS_ENABLED(CONFIG_RISCV_ISA_##ext) && riscv_has_extension_likely(RISCV_ISA_EXT_##ext))
+
 static inline bool rvc_enabled(void)
 {
 	return IS_ENABLED(CONFIG_RISCV_ISA_C);
-}
-
-static inline bool rvzbb_enabled(void)
-{
-	return IS_ENABLED(CONFIG_RISCV_ISA_ZBB) && riscv_has_extension_likely(RISCV_ISA_EXT_ZBB);
 }
 
 enum {
@@ -79,6 +78,8 @@ struct rv_jit_context {
 	int epilogue_offset;
 	int *offset;		/* BPF to RV */
 	int nexentries;
+	int ex_insn_off;
+	int ex_jmp_off;
 	unsigned long flags;
 	int stack_size;
 	u64 arena_vm_start;
@@ -603,6 +604,21 @@ static inline u32 rv_fence(u8 pred, u8 succ)
 	return rv_i_insn(imm11_0, 0, 0, 0, 0xf);
 }
 
+static inline void emit_fence_r_rw(struct rv_jit_context *ctx)
+{
+	emit(rv_fence(0x2, 0x3), ctx);
+}
+
+static inline void emit_fence_rw_w(struct rv_jit_context *ctx)
+{
+	emit(rv_fence(0x3, 0x1), ctx);
+}
+
+static inline void emit_fence_rw_rw(struct rv_jit_context *ctx)
+{
+	emit(rv_fence(0x3, 0x3), ctx);
+}
+
 static inline u32 rv_nop(void)
 {
 	return rv_i_insn(0, 0, 0, 0, 0x13);
@@ -735,6 +751,28 @@ static inline u16 rvc_swsp(u32 imm8, u8 rs2)
 
 	imm = (imm8 & 0x3c) | ((imm8 & 0xc0) >> 6);
 	return rv_css_insn(0x6, imm, rs2, 0x2);
+}
+
+/* RVZACAS instructions. */
+static inline u32 rvzacas_amocas_w(u8 rd, u8 rs2, u8 rs1, u8 aq, u8 rl)
+{
+	return rv_amo_insn(0x5, aq, rl, rs2, rs1, 2, rd, 0x2f);
+}
+
+static inline u32 rvzacas_amocas_d(u8 rd, u8 rs2, u8 rs1, u8 aq, u8 rl)
+{
+	return rv_amo_insn(0x5, aq, rl, rs2, rs1, 3, rd, 0x2f);
+}
+
+/* RVZBA instructions. */
+static inline u32 rvzba_sh2add(u8 rd, u8 rs1, u8 rs2)
+{
+	return rv_r_insn(0x10, rs2, rs1, 0x4, rd, 0x33);
+}
+
+static inline u32 rvzba_sh3add(u8 rd, u8 rs1, u8 rs2)
+{
+	return rv_r_insn(0x10, rs2, rs1, 0x6, rd, 0x33);
 }
 
 /* RVZBB instructions. */
@@ -939,6 +977,14 @@ static inline u16 rvc_sdsp(u32 imm9, u8 rs2)
 	return rv_css_insn(0x7, imm, rs2, 0x2);
 }
 
+/* RV64-only ZBA instructions. */
+
+static inline u32 rvzba_zextw(u8 rd, u8 rs1)
+{
+	/* add.uw rd, rs1, ZERO */
+	return rv_r_insn(0x04, RV_REG_ZERO, rs1, 0, rd, 0x3b);
+}
+
 #endif /* __riscv_xlen == 64 */
 
 /* Helper functions that emit RVC instructions when possible. */
@@ -1082,6 +1128,28 @@ static inline void emit_sw(u8 rs1, s32 off, u8 rs2, struct rv_jit_context *ctx)
 		emit(rv_sw(rs1, off, rs2), ctx);
 }
 
+static inline void emit_sh2add(u8 rd, u8 rs1, u8 rs2, struct rv_jit_context *ctx)
+{
+	if (rv_ext_enabled(ZBA)) {
+		emit(rvzba_sh2add(rd, rs1, rs2), ctx);
+		return;
+	}
+
+	emit_slli(rd, rs1, 2, ctx);
+	emit_add(rd, rd, rs2, ctx);
+}
+
+static inline void emit_sh3add(u8 rd, u8 rs1, u8 rs2, struct rv_jit_context *ctx)
+{
+	if (rv_ext_enabled(ZBA)) {
+		emit(rvzba_sh3add(rd, rs1, rs2), ctx);
+		return;
+	}
+
+	emit_slli(rd, rs1, 3, ctx);
+	emit_add(rd, rd, rs2, ctx);
+}
+
 /* RV64-only helper functions. */
 #if __riscv_xlen == 64
 
@@ -1123,7 +1191,7 @@ static inline void emit_subw(u8 rd, u8 rs1, u8 rs2, struct rv_jit_context *ctx)
 
 static inline void emit_sextb(u8 rd, u8 rs, struct rv_jit_context *ctx)
 {
-	if (rvzbb_enabled()) {
+	if (rv_ext_enabled(ZBB)) {
 		emit(rvzbb_sextb(rd, rs), ctx);
 		return;
 	}
@@ -1134,7 +1202,7 @@ static inline void emit_sextb(u8 rd, u8 rs, struct rv_jit_context *ctx)
 
 static inline void emit_sexth(u8 rd, u8 rs, struct rv_jit_context *ctx)
 {
-	if (rvzbb_enabled()) {
+	if (rv_ext_enabled(ZBB)) {
 		emit(rvzbb_sexth(rd, rs), ctx);
 		return;
 	}
@@ -1150,7 +1218,7 @@ static inline void emit_sextw(u8 rd, u8 rs, struct rv_jit_context *ctx)
 
 static inline void emit_zexth(u8 rd, u8 rs, struct rv_jit_context *ctx)
 {
-	if (rvzbb_enabled()) {
+	if (rv_ext_enabled(ZBB)) {
 		emit(rvzbb_zexth(rd, rs), ctx);
 		return;
 	}
@@ -1161,13 +1229,18 @@ static inline void emit_zexth(u8 rd, u8 rs, struct rv_jit_context *ctx)
 
 static inline void emit_zextw(u8 rd, u8 rs, struct rv_jit_context *ctx)
 {
+	if (rv_ext_enabled(ZBA)) {
+		emit(rvzba_zextw(rd, rs), ctx);
+		return;
+	}
+
 	emit_slli(rd, rs, 32, ctx);
 	emit_srli(rd, rd, 32, ctx);
 }
 
 static inline void emit_bswap(u8 rd, s32 imm, struct rv_jit_context *ctx)
 {
-	if (rvzbb_enabled()) {
+	if (rv_ext_enabled(ZBB)) {
 		int bits = 64 - imm;
 
 		emit(rvzbb_rev8(rd, rd), ctx);
@@ -1221,6 +1294,35 @@ out_be:
 	emit_add(RV_REG_T2, RV_REG_T2, RV_REG_T1, ctx);
 
 	emit_mv(rd, RV_REG_T2, ctx);
+}
+
+static inline void emit_cmpxchg(u8 rd, u8 rs, u8 r0, bool is64, struct rv_jit_context *ctx)
+{
+	int jmp_offset;
+
+	if (rv_ext_enabled(ZACAS)) {
+		ctx->ex_insn_off = ctx->ninsns;
+		emit(is64 ? rvzacas_amocas_d(r0, rs, rd, 1, 1) :
+		     rvzacas_amocas_w(r0, rs, rd, 1, 1), ctx);
+		ctx->ex_jmp_off = ctx->ninsns;
+		if (!is64)
+			emit_zextw(r0, r0, ctx);
+		return;
+	}
+
+	if (is64)
+		emit_mv(RV_REG_T2, r0, ctx);
+	else
+		emit_addiw(RV_REG_T2, r0, 0, ctx);
+	emit(is64 ? rv_lr_d(r0, 0, rd, 0, 0) :
+	     rv_lr_w(r0, 0, rd, 0, 0), ctx);
+	jmp_offset = ninsns_rvoff(8);
+	emit(rv_bne(RV_REG_T2, r0, jmp_offset >> 1), ctx);
+	emit(is64 ? rv_sc_d(RV_REG_T3, rs, rd, 0, 1) :
+	     rv_sc_w(RV_REG_T3, rs, rd, 0, 1), ctx);
+	jmp_offset = ninsns_rvoff(-6);
+	emit(rv_bne(RV_REG_T3, 0, jmp_offset >> 1), ctx);
+	emit_fence_rw_rw(ctx);
 }
 
 #endif /* __riscv_xlen == 64 */

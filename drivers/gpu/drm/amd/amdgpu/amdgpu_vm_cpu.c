@@ -39,20 +39,20 @@ static int amdgpu_vm_cpu_map_table(struct amdgpu_bo_vm *table)
  * amdgpu_vm_cpu_prepare - prepare page table update with the CPU
  *
  * @p: see amdgpu_vm_update_params definition
- * @resv: reservation object with embedded fence
- * @sync_mode: synchronization mode
+ * @sync: sync obj with fences to wait on
+ * @k_job_id: the id for tracing/debug purposes
  *
  * Returns:
  * Negativ errno, 0 for success.
  */
 static int amdgpu_vm_cpu_prepare(struct amdgpu_vm_update_params *p,
-				 struct dma_resv *resv,
-				 enum amdgpu_sync_mode sync_mode)
+				 struct amdgpu_sync *sync,
+				 u64 k_job_id)
 {
-	if (!resv)
+	if (!sync)
 		return 0;
 
-	return amdgpu_bo_sync_wait_resv(p->adev, resv, sync_mode, p->vm, true);
+	return amdgpu_sync_wait(sync, true);
 }
 
 /**

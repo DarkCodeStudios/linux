@@ -110,7 +110,7 @@ irqreturn_t cnl_ipc4_irq_thread(int irq, void *context)
 
 	return IRQ_HANDLED;
 }
-EXPORT_SYMBOL_NS(cnl_ipc4_irq_thread, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc4_irq_thread, "SND_SOC_SOF_INTEL_CNL");
 
 irqreturn_t cnl_ipc_irq_thread(int irq, void *context)
 {
@@ -203,7 +203,7 @@ irqreturn_t cnl_ipc_irq_thread(int irq, void *context)
 
 	return IRQ_HANDLED;
 }
-EXPORT_SYMBOL_NS(cnl_ipc_irq_thread, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc_irq_thread, "SND_SOC_SOF_INTEL_CNL");
 
 static void cnl_ipc_host_done(struct snd_sof_dev *sdev)
 {
@@ -286,7 +286,7 @@ int cnl_ipc4_send_msg(struct snd_sof_dev *sdev, struct snd_sof_ipc_msg *msg)
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(cnl_ipc4_send_msg, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc4_send_msg, "SND_SOC_SOF_INTEL_CNL");
 
 int cnl_ipc_send_msg(struct snd_sof_dev *sdev, struct snd_sof_ipc_msg *msg)
 {
@@ -329,12 +329,12 @@ int cnl_ipc_send_msg(struct snd_sof_dev *sdev, struct snd_sof_ipc_msg *msg)
 	 * CTX_SAVE IPC, which is sent before the DSP enters D3.
 	 */
 	if (hdr->cmd != (SOF_IPC_GLB_PM_MSG | SOF_IPC_PM_CTX_SAVE))
-		mod_delayed_work(system_wq, &hdev->d0i3_work,
+		mod_delayed_work(system_dfl_wq, &hdev->d0i3_work,
 				 msecs_to_jiffies(SOF_HDA_D0I3_WORK_DELAY_MS));
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(cnl_ipc_send_msg, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc_send_msg, "SND_SOC_SOF_INTEL_CNL");
 
 void cnl_ipc_dump(struct snd_sof_dev *sdev)
 {
@@ -355,7 +355,7 @@ void cnl_ipc_dump(struct snd_sof_dev *sdev)
 		"error: host status 0x%8.8x dsp status 0x%8.8x mask 0x%8.8x\n",
 		hipcida, hipctdr, hipcctl);
 }
-EXPORT_SYMBOL_NS(cnl_ipc_dump, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc_dump, "SND_SOC_SOF_INTEL_CNL");
 
 void cnl_ipc4_dump(struct snd_sof_dev *sdev)
 {
@@ -377,11 +377,11 @@ void cnl_ipc4_dump(struct snd_sof_dev *sdev)
 		"Host IPC initiator: %#x|%#x|%#x, target: %#x|%#x|%#x, ctl: %#x\n",
 		hipcidr, hipcidd, hipcida, hipctdr, hipctdd, hipctda, hipcctl);
 }
-EXPORT_SYMBOL_NS(cnl_ipc4_dump, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(cnl_ipc4_dump, "SND_SOC_SOF_INTEL_CNL");
 
 /* cannonlake ops */
 struct snd_sof_dsp_ops sof_cnl_ops;
-EXPORT_SYMBOL_NS(sof_cnl_ops, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(sof_cnl_ops, "SND_SOC_SOF_INTEL_CNL");
 
 int sof_cnl_ops_init(struct snd_sof_dev *sdev)
 {
@@ -450,7 +450,7 @@ int sof_cnl_ops_init(struct snd_sof_dev *sdev)
 
 	return 0;
 };
-EXPORT_SYMBOL_NS(sof_cnl_ops_init, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(sof_cnl_ops_init, "SND_SOC_SOF_INTEL_CNL");
 
 const struct sof_intel_dsp_desc cnl_chip_info = {
 	/* Cannonlake */
@@ -479,6 +479,7 @@ const struct sof_intel_dsp_desc cnl_chip_info = {
 	.power_down_dsp = hda_power_down_dsp,
 	.disable_interrupts = hda_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_CAVS_1_8,
+	.platform = "cnl",
 };
 
 /*
@@ -515,5 +516,6 @@ const struct sof_intel_dsp_desc jsl_chip_info = {
 	.power_down_dsp = hda_power_down_dsp,
 	.disable_interrupts = hda_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_CAVS_2_0,
+	.platform = "jsl",
 };
-EXPORT_SYMBOL_NS(jsl_chip_info, SND_SOC_SOF_INTEL_CNL);
+EXPORT_SYMBOL_NS(jsl_chip_info, "SND_SOC_SOF_INTEL_CNL");

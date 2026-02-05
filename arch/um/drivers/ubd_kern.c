@@ -36,7 +36,6 @@
 #include <linux/vmalloc.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
-#include <asm/tlbflush.h>
 #include <kern_util.h>
 #include "mconsole_kern.h"
 #include <init.h>
@@ -106,11 +105,10 @@ static inline void ubd_set_bit(__u64 bit, unsigned char *data)
 #define DRIVER_NAME "uml-blkdev"
 
 static DEFINE_MUTEX(ubd_lock);
-static DEFINE_MUTEX(ubd_mutex); /* replaces BKL, might not be needed */
 
 static int ubd_ioctl(struct block_device *bdev, blk_mode_t mode,
 		     unsigned int cmd, unsigned long arg);
-static int ubd_getgeo(struct block_device *bdev, struct hd_geometry *geo);
+static int ubd_getgeo(struct gendisk *disk, struct hd_geometry *geo);
 
 #define MAX_DEV (16)
 
@@ -372,7 +370,7 @@ __uml_help(ubd_setup,
 "    useful when a unique number should be given to the device. Note when\n"
 "    specifying a label, the filename2 must be also presented. It can be\n"
 "    an empty string, in which case the backing file is not used:\n"
-"       ubd0=File,,Serial\n"
+"       ubd0=File,,Serial\n\n"
 );
 
 static int udb_setup(char *str)
@@ -447,53 +445,41 @@ static int bulk_req_safe_read(
 	return n;
 }
 
-/* Called without dev->lock held, and only in interrupt context. */
-static void ubd_handler(void)
+static void ubd_end_request(struct io_thread_req *io_req)
 {
-	int n;
-	int count;
-
-	while(1){
-		n = bulk_req_safe_read(
-			thread_fd,
-			irq_req_buffer,
-			&irq_remainder,
-			&irq_remainder_size,
-			UBD_REQ_BUFFER_SIZE
-		);
-		if (n < 0) {
-			if(n == -EAGAIN)
-				break;
-			printk(KERN_ERR "spurious interrupt in ubd_handler, "
-			       "err = %d\n", -n);
-			return;
-		}
-		for (count = 0; count < n/sizeof(struct io_thread_req *); count++) {
-			struct io_thread_req *io_req = (*irq_req_buffer)[count];
-
-			if ((io_req->error == BLK_STS_NOTSUPP) && (req_op(io_req->req) == REQ_OP_DISCARD)) {
-				blk_queue_max_discard_sectors(io_req->req->q, 0);
-				blk_queue_max_write_zeroes_sectors(io_req->req->q, 0);
-			}
-			blk_mq_end_request(io_req->req, io_req->error);
-			kfree(io_req);
-		}
+	if (io_req->error == BLK_STS_NOTSUPP) {
+		if (req_op(io_req->req) == REQ_OP_DISCARD)
+			blk_queue_disable_discard(io_req->req->q);
+		else if (req_op(io_req->req) == REQ_OP_WRITE_ZEROES)
+			blk_queue_disable_write_zeroes(io_req->req->q);
 	}
+	blk_mq_end_request(io_req->req, io_req->error);
+	kfree(io_req);
 }
 
 static irqreturn_t ubd_intr(int irq, void *dev)
 {
-	ubd_handler();
+	int len, i;
+
+	while ((len = bulk_req_safe_read(thread_fd, irq_req_buffer,
+			&irq_remainder, &irq_remainder_size,
+			UBD_REQ_BUFFER_SIZE)) >= 0) {
+		for (i = 0; i < len / sizeof(struct io_thread_req *); i++)
+			ubd_end_request((*irq_req_buffer)[i]);
+	}
+
+	if (len < 0 && len != -EAGAIN)
+		pr_err("spurious interrupt in %s, err = %d\n", __func__, len);
 	return IRQ_HANDLED;
 }
 
 /* Only changed by ubd_init, which is an initcall. */
-static int io_pid = -1;
+static struct os_helper_thread *io_td;
 
 static void kill_io_thread(void)
 {
-	if(io_pid != -1)
-		os_kill_process(io_pid, 1);
+	if (io_td)
+		os_kill_helper_thread(io_td);
 }
 
 __uml_exitcall(kill_io_thread);
@@ -771,7 +757,6 @@ static int ubd_open_dev(struct ubd *ubd_dev)
 			printk(KERN_ERR "Failed to vmalloc COW bitmap\n");
 			goto error;
 		}
-		flush_tlb_kernel_vm();
 
 		err = read_cow_bitmap(ubd_dev->fd, ubd_dev->cow.bitmap,
 				      ubd_dev->cow.bitmap_offset,
@@ -794,7 +779,7 @@ static int ubd_open_dev(struct ubd *ubd_dev)
 
 static void ubd_device_release(struct device *dev)
 {
-	struct ubd *ubd_dev = dev_get_drvdata(dev);
+	struct ubd *ubd_dev = container_of(dev, struct ubd, pdev.dev);
 
 	blk_mq_free_tag_set(&ubd_dev->tag_set);
 	*ubd_dev = ((struct ubd) DEFAULT_UBD);
@@ -847,6 +832,7 @@ static int ubd_add(int n, char **error_out)
 	struct queue_limits lim = {
 		.max_segments		= MAX_SG,
 		.seg_boundary_mask	= PAGE_SIZE - 1,
+		.features		= BLK_FEAT_WRITE_CACHE,
 	};
 	struct gendisk *disk;
 	int err = 0;
@@ -879,7 +865,6 @@ static int ubd_add(int n, char **error_out)
 	ubd_dev->tag_set.ops = &ubd_mq_ops;
 	ubd_dev->tag_set.queue_depth = 64;
 	ubd_dev->tag_set.numa_node = NUMA_NO_NODE;
-	ubd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	ubd_dev->tag_set.driver_data = ubd_dev;
 	ubd_dev->tag_set.nr_hw_queues = 1;
 
@@ -893,8 +878,6 @@ static int ubd_add(int n, char **error_out)
 		goto out_cleanup_tags;
 	}
 
-	blk_queue_flag_set(QUEUE_FLAG_NONROT, disk->queue);
-	blk_queue_write_cache(disk->queue, true, false);
 	disk->major = UBD_MAJOR;
 	disk->first_minor = n << UBD_SHIFT;
 	disk->minors = 1 << UBD_SHIFT;
@@ -913,6 +896,8 @@ static int ubd_add(int n, char **error_out)
 	err = device_add_disk(&ubd_dev->pdev.dev, disk, ubd_attr_groups);
 	if (err)
 		goto out_cleanup_disk;
+
+	ubd_dev->disk = disk;
 
 	return 0;
 
@@ -1119,8 +1104,8 @@ static int __init ubd_init(void)
 
 late_initcall(ubd_init);
 
-static int __init ubd_driver_init(void){
-	unsigned long stack;
+static int __init ubd_driver_init(void)
+{
 	int err;
 
 	/* Set by CONFIG_BLK_DEV_UBD_SYNC or ubd=sync.*/
@@ -1129,13 +1114,11 @@ static int __init ubd_driver_init(void){
 		/* Letting ubd=sync be like using ubd#s= instead of ubd#= is
 		 * enough. So use anyway the io thread. */
 	}
-	stack = alloc_stack(0, 0);
-	io_pid = start_io_thread(stack + PAGE_SIZE, &thread_fd);
-	if(io_pid < 0){
+	err = start_io_thread(&io_td, &thread_fd);
+	if (err < 0) {
 		printk(KERN_ERR
 		       "ubd : Failed to start I/O thread (errno = %d) - "
-		       "falling back to synchronous I/O\n", -io_pid);
-		io_pid = -1;
+		       "falling back to synchronous I/O\n", -err);
 		return 0;
 	}
 	err = um_request_irq(UBD_IRQ, thread_fd, IRQ_READ, ubd_intr,
@@ -1341,9 +1324,9 @@ static blk_status_t ubd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	return res;
 }
 
-static int ubd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+static int ubd_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 {
-	struct ubd *ubd_dev = bdev->bd_disk->private_data;
+	struct ubd *ubd_dev = disk->private_data;
 
 	geo->heads = 128;
 	geo->sectors = 32;
@@ -1511,11 +1494,11 @@ int kernel_fd = -1;
 /* Only changed by the io thread. XXX: currently unused. */
 static int io_count;
 
-int io_thread(void *arg)
+void *io_thread(void *arg)
 {
 	int n, count, written, res;
 
-	os_fix_helper_signals();
+	os_fix_helper_thread_signals();
 
 	while(1){
 		n = bulk_req_safe_read(
@@ -1557,5 +1540,5 @@ int io_thread(void *arg)
 		} while (written < n);
 	}
 
-	return 0;
+	return NULL;
 }

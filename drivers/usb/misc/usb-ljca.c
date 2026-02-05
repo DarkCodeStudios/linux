@@ -18,7 +18,7 @@
 #include <linux/usb.h>
 #include <linux/usb/ljca.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* command flags */
 #define LJCA_ACK_FLAG			BIT(0)
@@ -164,27 +164,39 @@ struct ljca_match_ids_walk_data {
 	struct acpi_device *adev;
 };
 
+/*
+ * ACPI hardware IDs for LJCA client devices.
+ *
+ * [1] Some BIOS implementations use these IDs for denoting LJCA client devices
+ *     even though the IDs have been allocated for USBIO. This isn't a problem
+ *     as the usb-ljca driver is probed based on the USB device's vendor and
+ *     product IDs and its client drivers are probed based on auxiliary device
+ *     names, not these ACPI _HIDs. List of such systems:
+ *
+ *     Dell Precision 5490
+ */
 static const struct acpi_device_id ljca_gpio_hids[] = {
-	{ "INTC1074" },
-	{ "INTC1096" },
-	{ "INTC100B" },
-	{ "INTC10D1" },
+	{ "INTC100B" }, /* RPL LJCA GPIO */
+	{ "INTC1074" }, /* CVF LJCA GPIO */
+	{ "INTC1096" }, /* ADL LJCA GPIO */
+	{ "INTC10B5" }, /* LNL LJCA GPIO */
+	{ "INTC10D1" }, /* MTL (CVF VSC) USBIO GPIO [1] */
 	{},
 };
 
 static const struct acpi_device_id ljca_i2c_hids[] = {
-	{ "INTC1075" },
-	{ "INTC1097" },
-	{ "INTC100C" },
-	{ "INTC10D2" },
+	{ "INTC100C" }, /* RPL LJCA I2C */
+	{ "INTC1075" }, /* CVF LJCA I2C */
+	{ "INTC1097" }, /* ADL LJCA I2C */
+	{ "INTC10D2" }, /* MTL (CVF VSC) USBIO I2C [1] */
 	{},
 };
 
 static const struct acpi_device_id ljca_spi_hids[] = {
-	{ "INTC1091" },
-	{ "INTC1098" },
-	{ "INTC100D" },
-	{ "INTC10D3" },
+	{ "INTC100D" }, /* RPL LJCA SPI */
+	{ "INTC1091" }, /* TGL/ADL LJCA SPI */
+	{ "INTC1098" }, /* ADL LJCA SPI */
+	{ "INTC10D3" }, /* MTL (CVF VSC) USBIO SPI [1] */
 	{},
 };
 
@@ -331,14 +343,11 @@ static int ljca_send(struct ljca_adapter *adap, u8 type, u8 cmd,
 
 	ret = usb_bulk_msg(adap->usb_dev, adap->tx_pipe, header,
 			   msg_len, &transferred, LJCA_WRITE_TIMEOUT_MS);
-
-	usb_autopm_put_interface(adap->intf);
-
 	if (ret < 0)
-		goto out;
+		goto out_put;
 	if (transferred != msg_len) {
 		ret = -EIO;
-		goto out;
+		goto out_put;
 	}
 
 	if (ack) {
@@ -346,10 +355,13 @@ static int ljca_send(struct ljca_adapter *adap, u8 type, u8 cmd,
 						  timeout);
 		if (!ret) {
 			ret = -ETIMEDOUT;
-			goto out;
+			goto out_put;
 		}
 	}
 	ret = adap->actual_length;
+
+out_put:
+	usb_autopm_put_interface(adap->intf);
 
 out:
 	spin_lock_irqsave(&adap->lock, flags);
@@ -371,7 +383,7 @@ int ljca_transfer(struct ljca_client *client, u8 cmd, const u8 *obuf,
 			 obuf, obuf_len, ibuf, ibuf_len, true,
 			 LJCA_WRITE_ACK_TIMEOUT_MS);
 }
-EXPORT_SYMBOL_NS_GPL(ljca_transfer, LJCA);
+EXPORT_SYMBOL_NS_GPL(ljca_transfer, "LJCA");
 
 int ljca_transfer_noack(struct ljca_client *client, u8 cmd, const u8 *obuf,
 			u8 obuf_len)
@@ -379,7 +391,7 @@ int ljca_transfer_noack(struct ljca_client *client, u8 cmd, const u8 *obuf,
 	return ljca_send(client->adapter, client->type, cmd, obuf,
 			 obuf_len, NULL, 0, false, LJCA_WRITE_ACK_TIMEOUT_MS);
 }
-EXPORT_SYMBOL_NS_GPL(ljca_transfer_noack, LJCA);
+EXPORT_SYMBOL_NS_GPL(ljca_transfer_noack, "LJCA");
 
 int ljca_register_event_cb(struct ljca_client *client, ljca_event_cb_t event_cb,
 			   void *context)
@@ -403,7 +415,7 @@ int ljca_register_event_cb(struct ljca_client *client, ljca_event_cb_t event_cb,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(ljca_register_event_cb, LJCA);
+EXPORT_SYMBOL_NS_GPL(ljca_register_event_cb, "LJCA");
 
 void ljca_unregister_event_cb(struct ljca_client *client)
 {
@@ -416,7 +428,7 @@ void ljca_unregister_event_cb(struct ljca_client *client)
 
 	spin_unlock_irqrestore(&client->event_cb_lock, flags);
 }
-EXPORT_SYMBOL_NS_GPL(ljca_unregister_event_cb, LJCA);
+EXPORT_SYMBOL_NS_GPL(ljca_unregister_event_cb, "LJCA");
 
 static int ljca_match_device_ids(struct acpi_device *adev, void *data)
 {
@@ -810,6 +822,14 @@ static int ljca_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_free;
 
+	/*
+	 * This works around problems with ov2740 initialization on some
+	 * Lenovo platforms. The autosuspend delay, has to be smaller than
+	 * the delay after setting the reset_gpio line in ov2740_resume().
+	 * Otherwise the sensor randomly fails to initialize.
+	 */
+	pm_runtime_set_autosuspend_delay(&usb_dev->dev, 10);
+
 	usb_enable_autosuspend(usb_dev);
 
 	return 0;
@@ -882,7 +902,7 @@ static struct usb_driver ljca_driver = {
 };
 module_usb_driver(ljca_driver);
 
-MODULE_AUTHOR("Wentong Wu <wentong.wu@intel.com>");
+MODULE_AUTHOR("Wentong Wu");
 MODULE_AUTHOR("Zhifeng Wang <zhifeng.wang@intel.com>");
 MODULE_AUTHOR("Lixu Zhang <lixu.zhang@intel.com>");
 MODULE_DESCRIPTION("Intel La Jolla Cove Adapter USB driver");

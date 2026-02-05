@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /*
  * Copyright 2023 Advanced Micro Devices, Inc.
  *
@@ -24,20 +25,21 @@
  */
 
 #include "amdgpu_dm_replay.h"
+#include "dc_dmub_srv.h"
 #include "dc.h"
 #include "dm_helpers.h"
 #include "amdgpu_dm.h"
 #include "modules/power/power_helpers.h"
 #include "dmub/inc/dmub_cmd.h"
-#include "dc/inc/link.h"
+#include "dc/inc/link_service.h"
 
 /*
- * link_supports_replay() - check if the link supports replay
+ * amdgpu_dm_link_supports_replay() - check if the link supports replay
  * @link: link
  * @aconnector: aconnector
  *
  */
-static bool link_supports_replay(struct dc_link *link, struct amdgpu_dm_connector *aconnector)
+bool amdgpu_dm_link_supports_replay(struct dc_link *link, struct amdgpu_dm_connector *aconnector)
 {
 	struct dm_connector_state *state = to_dm_connector_state(aconnector->base.state);
 	struct dpcd_caps *dpcd_caps = &link->dpcd_caps;
@@ -78,6 +80,7 @@ bool amdgpu_dm_set_replay_caps(struct dc_link *link, struct amdgpu_dm_connector 
 {
 	struct replay_config pr_config = { 0 };
 	union replay_debug_flags *debug_flags = NULL;
+	struct dc *dc = link->ctx->dc;
 
 	// If Replay is already set to support, return true to skip checks
 	if (link->replay_settings.config.replay_supported)
@@ -89,7 +92,11 @@ bool amdgpu_dm_set_replay_caps(struct dc_link *link, struct amdgpu_dm_connector 
 	if (link->panel_config.psr.disallow_replay)
 		return false;
 
-	if (!link_supports_replay(link, aconnector))
+	if (!amdgpu_dm_link_supports_replay(link, aconnector))
+		return false;
+
+	if (!dc->ctx->dmub_srv || !dc->ctx->dmub_srv->dmub ||
+		!dc->ctx->dmub_srv->dmub->feature_caps.replay_supported)
 		return false;
 
 	// Mark Replay is supported in pr_config
@@ -155,7 +162,7 @@ bool amdgpu_dm_replay_enable(struct dc_stream_state *stream, bool wait)
 
 	if (link) {
 		link->dc->link_srv->edp_setup_replay(link, stream);
-		link->dc->link_srv->edp_set_coasting_vtotal(link, stream->timing.v_total);
+		link->dc->link_srv->edp_set_coasting_vtotal(link, stream->timing.v_total, 0);
 		DRM_DEBUG_DRIVER("Enabling replay...\n");
 		link->dc->link_srv->edp_set_replay_allow_active(link, &replay_active, wait, false, NULL);
 		return true;

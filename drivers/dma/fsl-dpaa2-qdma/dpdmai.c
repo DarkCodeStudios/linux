@@ -48,11 +48,6 @@ struct dpdmai_cmd_destroy {
 	__le32 dpdmai_id;
 } __packed;
 
-static inline u64 mc_enc(int lsoffset, int width, u64 val)
-{
-	return (val & MAKE_UMASK64(width)) << lsoffset;
-}
-
 /**
  * dpdmai_open() - Open a control session for the specified object
  * @mc_io:	Pointer to MC portal's I/O object
@@ -367,4 +362,5 @@ int dpdmai_get_tx_queue(struct fsl_mc_io *mc_io, u32 cmd_flags,
 }
 EXPORT_SYMBOL_GPL(dpdmai_get_tx_queue);
 
+MODULE_DESCRIPTION("NXP DPAA2 QDMA driver");
 MODULE_LICENSE("GPL v2");

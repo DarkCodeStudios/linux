@@ -23,7 +23,6 @@
  */
 
 #include <linux/device.h>
-#include <linux/export.h>
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
@@ -380,7 +379,8 @@ int kfd_init_apertures(struct kfd_process *process)
 
 		pdd = kfd_create_process_device_data(dev, process);
 		if (!pdd) {
-			pr_err("Failed to create process device data\n");
+			dev_err(dev->adev->dev,
+				"Failed to create process device data\n");
 			return -ENOMEM;
 		}
 		/*

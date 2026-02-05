@@ -17,6 +17,8 @@
 #include <linux/of_irq.h>
 #include <linux/syscore_ops.h>
 
+#include "irq-loongson.h"
+
 /* Registers */
 #define PCH_PIC_MASK		0x20
 #define PCH_PIC_HTMSI_EN	0x40
@@ -276,7 +278,7 @@ static void pch_pic_reset(struct pch_pic *priv)
 	}
 }
 
-static int pch_pic_suspend(void)
+static int pch_pic_suspend(void *data)
 {
 	int i, j;
 
@@ -294,7 +296,7 @@ static int pch_pic_suspend(void)
 	return 0;
 }
 
-static void pch_pic_resume(void)
+static void pch_pic_resume(void *data)
 {
 	int i, j;
 
@@ -311,9 +313,13 @@ static void pch_pic_resume(void)
 	}
 }
 
-static struct syscore_ops pch_pic_syscore_ops = {
+static const struct syscore_ops pch_pic_syscore_ops = {
 	.suspend =  pch_pic_suspend,
 	.resume =  pch_pic_resume,
+};
+
+static struct syscore pch_pic_syscore = {
+	.ops = &pch_pic_syscore_ops,
 };
 
 static int pch_pic_init(phys_addr_t addr, unsigned long size, int vec_base,
@@ -354,7 +360,7 @@ static int pch_pic_init(phys_addr_t addr, unsigned long size, int vec_base,
 	pch_pic_priv[nr_pics++] = priv;
 
 	if (nr_pics == 1)
-		register_syscore_ops(&pch_pic_syscore_ops);
+		register_syscore(&pch_pic_syscore);
 
 	return 0;
 
@@ -390,7 +396,7 @@ static int pch_pic_of_init(struct device_node *node,
 	}
 
 	err = pch_pic_init(res.start, resource_size(&res), vec_base,
-				parent_domain, of_node_to_fwnode(node), 0);
+				parent_domain, of_fwnode_handle(node), 0);
 	if (err < 0)
 		return err;
 

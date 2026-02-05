@@ -25,7 +25,7 @@
 #include <linux/configfs.h>
 #include <linux/kernel.h>
 #include <linux/ctype.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <scsi/libfc.h>
 
 #include <target/target_core_base.h>
@@ -250,7 +250,7 @@ static struct se_portal_group *ft_add_tpg(struct se_wwn *wwn, const char *name)
 	tpg->lport_wwn = ft_wwn;
 	INIT_LIST_HEAD(&tpg->lun_list);
 
-	wq = alloc_workqueue("tcm_fc", 0, 1);
+	wq = alloc_workqueue("tcm_fc", WQ_PERCPU, 1);
 	if (!wq) {
 		kfree(tpg);
 		return NULL;

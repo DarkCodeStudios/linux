@@ -306,15 +306,9 @@ static void capincci_alloc_minor(struct capidev *cdev, struct capincci *np)
 static void capincci_free_minor(struct capincci *np)
 {
 	struct capiminor *mp = np->minorp;
-	struct tty_struct *tty;
 
 	if (mp) {
-		tty = tty_port_tty_get(&mp->port);
-		if (tty) {
-			tty_vhangup(tty);
-			tty_kref_put(tty);
-		}
-
+		tty_port_tty_vhangup(&mp->port);
 		capiminor_free(mp);
 	}
 }
@@ -1024,7 +1018,6 @@ static int capi_release(struct inode *inode, struct file *file)
 static const struct file_operations capi_fops =
 {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.read		= capi_read,
 	.write		= capi_write,
 	.poll		= capi_poll,

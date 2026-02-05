@@ -32,9 +32,10 @@ For more details see the file COPYING in the source distribution of Linux.
 	cx2341x-uapi
 	dw100
 	imx-uapi
+	mali-c55
 	max2175
 	npcm-video
 	omap3isp-uapi
-	st-vgxy61
 	thp7312
 	uvcvideo
+	vgxy61

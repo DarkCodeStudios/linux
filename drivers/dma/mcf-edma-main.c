@@ -64,7 +64,6 @@ static irqreturn_t mcf_edma_err_handler(int irq, void *dev_id)
 			fsl_edma_disable_request(&mcf_edma->chans[ch]);
 			iowrite8(EDMA_CERR_CERR(ch), regs->cerr);
 			mcf_edma->chans[ch].status = DMA_ERROR;
-			mcf_edma->chans[ch].idle = true;
 		}
 	}
 
@@ -196,7 +195,6 @@ static int mcf_edma_probe(struct platform_device *pdev)
 
 		mcf_chan->edma = mcf_edma;
 		mcf_chan->srcid = i;
-		mcf_chan->idle = true;
 		mcf_chan->dma_dir = DMA_NONE;
 		mcf_chan->vchan.desc_free = fsl_edma_free_desc;
 		vchan_init(&mcf_chan->vchan, &mcf_edma->dma_dev);
@@ -269,7 +267,7 @@ static struct platform_driver mcf_edma_driver = {
 		.name	= "mcf-edma",
 	},
 	.probe		= mcf_edma_probe,
-	.remove_new	= mcf_edma_remove,
+	.remove		= mcf_edma_remove,
 };
 
 bool mcf_edma_filter_fn(struct dma_chan *chan, void *param)

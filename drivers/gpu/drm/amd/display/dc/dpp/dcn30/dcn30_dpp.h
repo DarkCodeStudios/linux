@@ -175,8 +175,6 @@
 	SRI(CM_BLNDGAM_RAMB_START_SLOPE_CNTL_R, CM, id),\
 	SRI(CM_BLNDGAM_LUT_CONTROL, CM, id)
 
-
-
 #define DPP_REG_LIST_SH_MASK_DCN30_COMMON(mask_sh)\
 	TF_SF(CM0_CM_MEM_PWR_STATUS, GAMCOR_MEM_PWR_STATE, mask_sh),\
 	TF_SF(CM0_CM_DEALPHA, CM_DEALPHA_EN, mask_sh),\
@@ -574,6 +572,7 @@ struct dcn3_dpp {
 	int lb_memory_size;
 	int lb_bits_per_entry;
 	bool is_write_to_ram_a_safe;
+	bool dispclk_r_gate_disable;
 	struct scaler_data scl_data;
 	struct pwl_params pwl_data;
 };
@@ -595,12 +594,14 @@ void dpp3_program_CM_dealpha(
 void dpp30_read_state(struct dpp *dpp_base,
 		struct dcn_dpp_state *s);
 
+void dpp30_read_reg_state(struct dpp *dpp_base, struct dcn_dpp_reg_state *dpp_reg_state);
+
 bool dpp3_get_optimal_number_of_taps(
 		struct dpp *dpp,
 		struct scaler_data *scl_data,
 		const struct scaling_taps *in_taps);
 
-void dpp3_cnv_setup (
+void dpp3_cnv_setup(
 		struct dpp *dpp_base,
 		enum surface_pixel_format format,
 		enum expansion_mode mode,

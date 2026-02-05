@@ -205,9 +205,24 @@ struct gamma_coefficients {
 	struct fixed31_32 user_brightness;
 };
 
+/**
+ * struct pwl_float_data - Fixed point RGB color
+ */
 struct pwl_float_data {
+	/**
+	 * @r: Component Red.
+	 */
 	struct fixed31_32 r;
+
+	/**
+	 * @g: Component Green.
+	 */
+
 	struct fixed31_32 g;
+
+	/**
+	 * @b: Component Blue.
+	 */
 	struct fixed31_32 b;
 };
 
@@ -282,6 +297,16 @@ struct oppbuf_params {
 	uint32_t num_segment_padded_pixels;
 };
 
+struct dcn_opp_reg_state {
+	uint32_t dpg_control;
+	uint32_t fmt_control;
+	uint32_t oppbuf_control;
+	uint32_t opp_pipe_control;
+	uint32_t opp_pipe_crc_control;
+	uint32_t opp_abm_control;
+	uint32_t dscrm_dsc_forward_config;
+};
+
 struct opp_funcs {
 
 
@@ -346,8 +371,16 @@ struct opp_funcs {
 
 	void (*opp_program_left_edge_extra_pixel)(
 			struct output_pixel_processor *opp,
-			bool count);
+			enum dc_pixel_encoding pixel_encoding,
+			bool is_primary);
 
+	uint32_t (*opp_get_left_edge_extra_pixel_count)(
+			struct output_pixel_processor *opp,
+			enum dc_pixel_encoding pixel_encoding,
+			bool is_primary);
+
+	void (*opp_read_reg_state)(
+			struct output_pixel_processor *opp, struct dcn_opp_reg_state *opp_reg_state);
 };
 
 #endif

@@ -275,9 +275,13 @@ int parse_callchain_record(const char *arg, struct callchain_param *param)
 			if (tok) {
 				unsigned long size;
 
-				size = strtoul(tok, &name, 0);
-				if (size < (unsigned) sysctl__max_stack())
-					param->max_stack = size;
+				if (!strncmp(tok, "defer", sizeof("defer"))) {
+					param->defer = true;
+				} else {
+					size = strtoul(tok, &name, 0);
+					if (size < (unsigned) sysctl__max_stack())
+						param->max_stack = size;
+				}
 			}
 			break;
 
@@ -314,6 +318,12 @@ int parse_callchain_record(const char *arg, struct callchain_param *param)
 	} while (0);
 
 	free(buf);
+
+	if (param->defer && param->record_mode != CALLCHAIN_FP) {
+		pr_err("callchain: deferred callchain only works with FP\n");
+		return -EINVAL;
+	}
+
 	return ret;
 }
 
@@ -589,9 +599,7 @@ fill_node(struct callchain_node *node, struct callchain_cursor *cursor)
 			return -ENOMEM;
 		}
 		call->ip = cursor_node->ip;
-		call->ms = cursor_node->ms;
-		call->ms.map = map__get(call->ms.map);
-		call->ms.maps = maps__get(call->ms.maps);
+		map_symbol__copy(&call->ms, &cursor_node->ms);
 		call->srcline = cursor_node->srcline;
 
 		if (cursor_node->branch) {
@@ -1094,9 +1102,7 @@ int callchain_cursor_append(struct callchain_cursor *cursor,
 
 	node->ip = ip;
 	map_symbol__exit(&node->ms);
-	node->ms = *ms;
-	node->ms.maps = maps__get(ms->maps);
-	node->ms.map = map__get(ms->map);
+	map_symbol__copy(&node->ms, ms);
 	node->branch = branch;
 	node->nr_loop_iter = nr_loop_iter;
 	node->iter_cycles = iter_cycles;
@@ -1141,7 +1147,7 @@ int hist_entry__append_callchain(struct hist_entry *he, struct perf_sample *samp
 int fill_callchain_info(struct addr_location *al, struct callchain_cursor_node *node,
 			bool hide_unresolved)
 {
-	struct machine *machine = maps__machine(node->ms.maps);
+	struct machine *machine = node->ms.maps ? maps__machine(node->ms.maps) : NULL;
 
 	maps__put(al->maps);
 	al->maps = maps__get(node->ms.maps);
@@ -1564,7 +1570,7 @@ int callchain_node__make_parent_list(struct callchain_node *node)
 				goto out;
 			*new = *chain;
 			new->has_children = false;
-			new->ms.map = map__get(new->ms.map);
+			map_symbol__copy(&new->ms, &chain->ms);
 			list_add_tail(&new->list, &head);
 		}
 		parent = parent->parent;
@@ -1796,4 +1802,74 @@ s64 callchain_avg_cycles(struct callchain_node *cnode)
 	}
 
 	return cycles;
+}
+
+int sample__for_each_callchain_node(struct thread *thread, struct evsel *evsel,
+				    struct perf_sample *sample, int max_stack,
+				    bool symbols, callchain_iter_fn cb, void *data)
+{
+	struct callchain_cursor *cursor = get_tls_callchain_cursor();
+	int ret;
+
+	if (!cursor)
+		return -ENOMEM;
+
+	/* Fill in the callchain. */
+	ret = __thread__resolve_callchain(thread, cursor, evsel, sample,
+					  /*parent=*/NULL, /*root_al=*/NULL,
+					  max_stack, symbols);
+	if (ret)
+		return ret;
+
+	/* Switch from writing the callchain to reading it. */
+	callchain_cursor_commit(cursor);
+
+	while (1) {
+		struct callchain_cursor_node *node = callchain_cursor_current(cursor);
+
+		if (!node)
+			break;
+
+		ret = cb(node, data);
+		if (ret)
+			return ret;
+
+		callchain_cursor_advance(cursor);
+	}
+	return 0;
+}
+
+/*
+ * This function merges earlier samples (@sample_orig) waiting for deferred
+ * user callchains with the matching callchain record (@sample_callchain)
+ * which is delivered now.  The @sample_orig->callchain should be released
+ * after use if ->deferred_callchain is set.
+ */
+int sample__merge_deferred_callchain(struct perf_sample *sample_orig,
+				     struct perf_sample *sample_callchain)
+{
+	u64 nr_orig = sample_orig->callchain->nr - 1;
+	u64 nr_deferred = sample_callchain->callchain->nr;
+	struct ip_callchain *callchain;
+
+	if (sample_orig->callchain->nr < 2) {
+		sample_orig->deferred_callchain = false;
+		return -EINVAL;
+	}
+
+	callchain = calloc(1 + nr_orig + nr_deferred, sizeof(u64));
+	if (callchain == NULL) {
+		sample_orig->deferred_callchain = false;
+		return -ENOMEM;
+	}
+
+	callchain->nr = nr_orig + nr_deferred;
+	/* copy original including PERF_CONTEXT_USER_DEFERRED (but the cookie) */
+	memcpy(callchain->ips, sample_orig->callchain->ips, nr_orig * sizeof(u64));
+	/* copy deferred user callchains */
+	memcpy(&callchain->ips[nr_orig], sample_callchain->callchain->ips,
+	       nr_deferred * sizeof(u64));
+
+	sample_orig->callchain = callchain;
+	return 0;
 }

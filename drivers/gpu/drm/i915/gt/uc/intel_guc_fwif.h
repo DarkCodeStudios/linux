@@ -105,6 +105,7 @@
 #define   GUC_WA_ENABLE_TSC_CHECK_ON_RC6	BIT(22)
 
 #define GUC_CTL_FEATURE			2
+#define   GUC_CTL_ENABLE_GUC_PXP_CTL	BIT(1)
 #define   GUC_CTL_ENABLE_SLPC		BIT(2)
 #define   GUC_CTL_DISABLE_SCHEDULER	BIT(14)
 
@@ -295,7 +296,7 @@ struct guc_update_scheduling_policy_header {
 } __packed;
 
 /*
- * Can't dynmically allocate memory for the scheduling policy KLV because
+ * Can't dynamically allocate memory for the scheduling policy KLV because
  * it will be sent from within the reset path. Need a fixed size lump on
  * the stack instead :(.
  *
@@ -407,7 +408,7 @@ enum guc_capture_type {
 	GUC_CAPTURE_LIST_TYPE_MAX,
 };
 
-/* Class indecies for capture_class and capture_instance arrays */
+/* Class indices for capture_class and capture_instance arrays */
 enum {
 	GUC_CAPTURE_LIST_CLASS_RENDER_COMPUTE = 0,
 	GUC_CAPTURE_LIST_CLASS_VIDEO = 1,

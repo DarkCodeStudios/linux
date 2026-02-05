@@ -845,7 +845,7 @@ static DEF_SCSI_QCMD(ppa_queuecommand)
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
  */
-static int ppa_biosparam(struct scsi_device *sdev, struct block_device *dev,
+static int ppa_biosparam(struct scsi_device *sdev, struct gendisk *unused,
 	      sector_t capacity, int ip[])
 {
 	ip[0] = 0x40;
@@ -1104,7 +1104,6 @@ static int __ppa_attach(struct parport *pb)
 	host = scsi_host_alloc(&ppa_template, sizeof(ppa_struct *));
 	if (!host)
 		goto out1;
-	host->no_highmem = true;
 	host->io_port = pb->base;
 	host->n_io_port = ports;
 	host->dma_channel = -1;
@@ -1151,8 +1150,8 @@ static struct parport_driver ppa_driver = {
 	.name		= "ppa",
 	.match_port	= ppa_attach,
 	.detach		= ppa_detach,
-	.devmodel	= true,
 };
 module_parport_driver(ppa_driver);
 
+MODULE_DESCRIPTION("IOMEGA PPA3 parallel port SCSI host adapter driver");
 MODULE_LICENSE("GPL");

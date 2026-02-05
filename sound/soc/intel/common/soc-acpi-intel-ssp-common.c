@@ -64,6 +64,15 @@ static const struct codec_map amps[] = {
 	CODEC_MAP_ENTRY("RT1015P", "rt1015", RT1015P_ACPI_HID, CODEC_RT1015P),
 	CODEC_MAP_ENTRY("RT1019P", "rt1019", RT1019P_ACPI_HID, CODEC_RT1019P),
 	CODEC_MAP_ENTRY("RT1308", "rt1308", RT1308_ACPI_HID, CODEC_RT1308),
+
+	/*
+	 * Monolithic components
+	 *
+	 * Only put components that can serve as both the amp and the codec below this line.
+	 * This will ensure that if the part is used just as a codec and there is an amp as well
+	 * then the amp will be selected properly.
+	 */
+	CODEC_MAP_ENTRY("RT5650", "rt5650", RT5650_ACPI_HID, CODEC_RT5650),
 };
 
 enum snd_soc_acpi_intel_codec
@@ -81,7 +90,7 @@ snd_soc_acpi_intel_detect_codec_type(struct device *dev)
 
 	return CODEC_NONE;
 }
-EXPORT_SYMBOL_NS(snd_soc_acpi_intel_detect_codec_type, SND_SOC_ACPI_INTEL_MATCH);
+EXPORT_SYMBOL_NS(snd_soc_acpi_intel_detect_codec_type, "SND_SOC_ACPI_INTEL_MATCH");
 
 enum snd_soc_acpi_intel_codec
 snd_soc_acpi_intel_detect_amp_type(struct device *dev)
@@ -98,7 +107,7 @@ snd_soc_acpi_intel_detect_amp_type(struct device *dev)
 
 	return CODEC_NONE;
 }
-EXPORT_SYMBOL_NS(snd_soc_acpi_intel_detect_amp_type, SND_SOC_ACPI_INTEL_MATCH);
+EXPORT_SYMBOL_NS(snd_soc_acpi_intel_detect_amp_type, "SND_SOC_ACPI_INTEL_MATCH");
 
 const char *
 snd_soc_acpi_intel_get_codec_name(enum snd_soc_acpi_intel_codec codec_type)
@@ -120,7 +129,7 @@ snd_soc_acpi_intel_get_codec_name(enum snd_soc_acpi_intel_codec codec_type)
 
 	return NULL;
 }
-EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_codec_name, SND_SOC_ACPI_INTEL_MATCH);
+EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_codec_name, "SND_SOC_ACPI_INTEL_MATCH");
 
 const char *
 snd_soc_acpi_intel_get_codec_tplg_suffix(enum snd_soc_acpi_intel_codec codec_type)
@@ -136,7 +145,7 @@ snd_soc_acpi_intel_get_codec_tplg_suffix(enum snd_soc_acpi_intel_codec codec_typ
 
 	return NULL;
 }
-EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_codec_tplg_suffix, SND_SOC_ACPI_INTEL_MATCH);
+EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_codec_tplg_suffix, "SND_SOC_ACPI_INTEL_MATCH");
 
 const char *
 snd_soc_acpi_intel_get_amp_tplg_suffix(enum snd_soc_acpi_intel_codec codec_type)
@@ -152,7 +161,7 @@ snd_soc_acpi_intel_get_amp_tplg_suffix(enum snd_soc_acpi_intel_codec codec_type)
 
 	return NULL;
 }
-EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_amp_tplg_suffix, SND_SOC_ACPI_INTEL_MATCH);
+EXPORT_SYMBOL_NS(snd_soc_acpi_intel_get_amp_tplg_suffix, "SND_SOC_ACPI_INTEL_MATCH");
 
 MODULE_DESCRIPTION("ASoC Intel SOF Common Machine Driver Helpers");
 MODULE_AUTHOR("Brent Lu <brent.lu@intel.com>");

@@ -18,6 +18,7 @@
 #include <linux/of_fdt.h>
 #include <linux/libfdt.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/memblock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -48,201 +49,18 @@ const struct kexec_file_ops * const kexec_file_loaders[] = {
 	NULL
 };
 
-/**
- * __locate_mem_hole_top_down - Looks top down for a large enough memory hole
- *                              in the memory regions between buf_min & buf_max
- *                              for the buffer. If found, sets kbuf->mem.
- * @kbuf:                       Buffer contents and memory parameters.
- * @buf_min:                    Minimum address for the buffer.
- * @buf_max:                    Maximum address for the buffer.
- *
- * Returns 0 on success, negative errno on error.
- */
-static int __locate_mem_hole_top_down(struct kexec_buf *kbuf,
-				      u64 buf_min, u64 buf_max)
+int arch_check_excluded_range(struct kimage *image, unsigned long start,
+			      unsigned long end)
 {
-	int ret = -EADDRNOTAVAIL;
-	phys_addr_t start, end;
-	u64 i;
+	struct crash_mem *emem;
+	int i;
 
-	for_each_mem_range_rev(i, &start, &end) {
-		/*
-		 * memblock uses [start, end) convention while it is
-		 * [start, end] here. Fix the off-by-one to have the
-		 * same convention.
-		 */
-		end -= 1;
+	emem = image->arch.exclude_ranges;
+	for (i = 0; i < emem->nr_ranges; i++)
+		if (start < emem->ranges[i].end && end > emem->ranges[i].start)
+			return 1;
 
-		if (start > buf_max)
-			continue;
-
-		/* Memory hole not found */
-		if (end < buf_min)
-			break;
-
-		/* Adjust memory region based on the given range */
-		if (start < buf_min)
-			start = buf_min;
-		if (end > buf_max)
-			end = buf_max;
-
-		start = ALIGN(start, kbuf->buf_align);
-		if (start < end && (end - start + 1) >= kbuf->memsz) {
-			/* Suitable memory range found. Set kbuf->mem */
-			kbuf->mem = ALIGN_DOWN(end - kbuf->memsz + 1,
-					       kbuf->buf_align);
-			ret = 0;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/**
- * locate_mem_hole_top_down_ppc64 - Skip special memory regions to find a
- *                                  suitable buffer with top down approach.
- * @kbuf:                           Buffer contents and memory parameters.
- * @buf_min:                        Minimum address for the buffer.
- * @buf_max:                        Maximum address for the buffer.
- * @emem:                           Exclude memory ranges.
- *
- * Returns 0 on success, negative errno on error.
- */
-static int locate_mem_hole_top_down_ppc64(struct kexec_buf *kbuf,
-					  u64 buf_min, u64 buf_max,
-					  const struct crash_mem *emem)
-{
-	int i, ret = 0, err = -EADDRNOTAVAIL;
-	u64 start, end, tmin, tmax;
-
-	tmax = buf_max;
-	for (i = (emem->nr_ranges - 1); i >= 0; i--) {
-		start = emem->ranges[i].start;
-		end = emem->ranges[i].end;
-
-		if (start > tmax)
-			continue;
-
-		if (end < tmax) {
-			tmin = (end < buf_min ? buf_min : end + 1);
-			ret = __locate_mem_hole_top_down(kbuf, tmin, tmax);
-			if (!ret)
-				return 0;
-		}
-
-		tmax = start - 1;
-
-		if (tmax < buf_min) {
-			ret = err;
-			break;
-		}
-		ret = 0;
-	}
-
-	if (!ret) {
-		tmin = buf_min;
-		ret = __locate_mem_hole_top_down(kbuf, tmin, tmax);
-	}
-	return ret;
-}
-
-/**
- * __locate_mem_hole_bottom_up - Looks bottom up for a large enough memory hole
- *                               in the memory regions between buf_min & buf_max
- *                               for the buffer. If found, sets kbuf->mem.
- * @kbuf:                        Buffer contents and memory parameters.
- * @buf_min:                     Minimum address for the buffer.
- * @buf_max:                     Maximum address for the buffer.
- *
- * Returns 0 on success, negative errno on error.
- */
-static int __locate_mem_hole_bottom_up(struct kexec_buf *kbuf,
-				       u64 buf_min, u64 buf_max)
-{
-	int ret = -EADDRNOTAVAIL;
-	phys_addr_t start, end;
-	u64 i;
-
-	for_each_mem_range(i, &start, &end) {
-		/*
-		 * memblock uses [start, end) convention while it is
-		 * [start, end] here. Fix the off-by-one to have the
-		 * same convention.
-		 */
-		end -= 1;
-
-		if (end < buf_min)
-			continue;
-
-		/* Memory hole not found */
-		if (start > buf_max)
-			break;
-
-		/* Adjust memory region based on the given range */
-		if (start < buf_min)
-			start = buf_min;
-		if (end > buf_max)
-			end = buf_max;
-
-		start = ALIGN(start, kbuf->buf_align);
-		if (start < end && (end - start + 1) >= kbuf->memsz) {
-			/* Suitable memory range found. Set kbuf->mem */
-			kbuf->mem = start;
-			ret = 0;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/**
- * locate_mem_hole_bottom_up_ppc64 - Skip special memory regions to find a
- *                                   suitable buffer with bottom up approach.
- * @kbuf:                            Buffer contents and memory parameters.
- * @buf_min:                         Minimum address for the buffer.
- * @buf_max:                         Maximum address for the buffer.
- * @emem:                            Exclude memory ranges.
- *
- * Returns 0 on success, negative errno on error.
- */
-static int locate_mem_hole_bottom_up_ppc64(struct kexec_buf *kbuf,
-					   u64 buf_min, u64 buf_max,
-					   const struct crash_mem *emem)
-{
-	int i, ret = 0, err = -EADDRNOTAVAIL;
-	u64 start, end, tmin, tmax;
-
-	tmin = buf_min;
-	for (i = 0; i < emem->nr_ranges; i++) {
-		start = emem->ranges[i].start;
-		end = emem->ranges[i].end;
-
-		if (end < tmin)
-			continue;
-
-		if (start > tmin) {
-			tmax = (start > buf_max ? buf_max : start - 1);
-			ret = __locate_mem_hole_bottom_up(kbuf, tmin, tmax);
-			if (!ret)
-				return 0;
-		}
-
-		tmin = end + 1;
-
-		if (tmin > buf_max) {
-			ret = err;
-			break;
-		}
-		ret = 0;
-	}
-
-	if (!ret) {
-		tmax = buf_max;
-		ret = __locate_mem_hole_bottom_up(kbuf, tmin, tmax);
-	}
-	return ret;
+	return 0;
 }
 
 #ifdef CONFIG_CRASH_DUMP
@@ -376,11 +194,10 @@ static int kdump_setup_usable_lmb(struct drmem_lmb *lmb, const __be32 **usm,
 static int add_usable_mem_property(void *fdt, struct device_node *dn,
 				   struct umem_info *um_info)
 {
-	int n_mem_addr_cells, n_mem_size_cells, node;
+	int node;
 	char path[NODE_PATH_LEN];
-	int i, len, ranges, ret;
-	const __be32 *prop;
-	u64 base, end;
+	int i, ret;
+	u64 base, size;
 
 	of_node_get(dn);
 
@@ -399,21 +216,9 @@ static int add_usable_mem_property(void *fdt, struct device_node *dn,
 		goto out;
 	}
 
-	/* Get the address & size cells */
-	n_mem_addr_cells = of_n_addr_cells(dn);
-	n_mem_size_cells = of_n_size_cells(dn);
-	kexec_dprintk("address cells: %d, size cells: %d\n", n_mem_addr_cells,
-		      n_mem_size_cells);
-
 	um_info->idx  = 0;
 	if (!check_realloc_usable_mem(um_info, 2)) {
 		ret = -ENOMEM;
-		goto out;
-	}
-
-	prop = of_get_property(dn, "reg", &len);
-	if (!prop || len <= 0) {
-		ret = 0;
 		goto out;
 	}
 
@@ -421,18 +226,19 @@ static int add_usable_mem_property(void *fdt, struct device_node *dn,
 	 * "reg" property represents sequence of (addr,size) tuples
 	 * each representing a memory range.
 	 */
-	ranges = (len >> 2) / (n_mem_addr_cells + n_mem_size_cells);
+	for (i = 0; ; i++) {
+		ret = of_property_read_reg(dn, i, &base, &size);
+		if (ret)
+			break;
 
-	for (i = 0; i < ranges; i++) {
-		base = of_read_number(prop, n_mem_addr_cells);
-		prop += n_mem_addr_cells;
-		end = base + of_read_number(prop, n_mem_size_cells) - 1;
-		prop += n_mem_size_cells;
-
-		ret = add_usable_mem(um_info, base, end);
+		ret = add_usable_mem(um_info, base, base + size - 1);
 		if (ret)
 			goto out;
 	}
+
+	// No reg or empty reg? Skip this node.
+	if (i == 0)
+		goto out;
 
 	/*
 	 * No kdump kernel usable memory found in this memory node.
@@ -747,13 +553,18 @@ int setup_purgatory_ppc64(struct kimage *image, const void *slave_code,
 	if (dn) {
 		u64 val;
 
-		of_property_read_u64(dn, "opal-base-address", &val);
+		ret = of_property_read_u64(dn, "opal-base-address", &val);
+		if (ret)
+			goto out;
+
 		ret = kexec_purgatory_get_set_symbol(image, "opal_base", &val,
 						     sizeof(val), false);
 		if (ret)
 			goto out;
 
-		of_property_read_u64(dn, "opal-entry-address", &val);
+		ret = of_property_read_u64(dn, "opal-entry-address", &val);
+		if (ret)
+			goto out;
 		ret = kexec_purgatory_get_set_symbol(image, "opal_entry", &val,
 						     sizeof(val), false);
 	}
@@ -803,10 +614,9 @@ static unsigned int cpu_node_size(void)
 	return size;
 }
 
-static unsigned int kdump_extra_fdt_size_ppc64(struct kimage *image)
+static unsigned int kdump_extra_fdt_size_ppc64(struct kimage *image, unsigned int cpu_nodes)
 {
-	unsigned int cpu_nodes, extra_size = 0;
-	struct device_node *dn;
+	unsigned int extra_size = 0;
 	u64 usm_entries;
 #ifdef CONFIG_CRASH_HOTPLUG
 	unsigned int possible_cpu_nodes;
@@ -825,18 +635,6 @@ static unsigned int kdump_extra_fdt_size_ppc64(struct kimage *image)
 			       (2 * (resource_size(&crashk_res) / drmem_lmb_size())));
 		extra_size += (unsigned int)(usm_entries * sizeof(u64));
 	}
-
-	/*
-	 * Get the number of CPU nodes in the current DT. This allows to
-	 * reserve places for CPU nodes added since the boot time.
-	 */
-	cpu_nodes = 0;
-	for_each_node_by_type(dn, "cpu") {
-		cpu_nodes++;
-	}
-
-	if (cpu_nodes > boot_cpu_node_count)
-		extra_size += (cpu_nodes - boot_cpu_node_count) * cpu_node_size();
 
 #ifdef CONFIG_CRASH_HOTPLUG
 	/*
@@ -861,16 +659,30 @@ static unsigned int kdump_extra_fdt_size_ppc64(struct kimage *image)
  *
  * Returns the estimated extra size needed for kexec/kdump kernel FDT.
  */
-unsigned int kexec_extra_fdt_size_ppc64(struct kimage *image)
+unsigned int kexec_extra_fdt_size_ppc64(struct kimage *image, struct crash_mem *rmem)
 {
-	unsigned int extra_size = 0;
+	struct device_node *dn;
+	unsigned int cpu_nodes = 0, extra_size = 0;
 
 	// Budget some space for the password blob. There's already extra space
 	// for the key name
 	if (plpks_is_available())
 		extra_size += (unsigned int)plpks_get_passwordlen();
 
-	return extra_size + kdump_extra_fdt_size_ppc64(image);
+	/* Get the number of CPU nodes in the current device tree */
+	for_each_node_by_type(dn, "cpu") {
+		cpu_nodes++;
+	}
+
+	/* Consider extra space for CPU nodes added since the boot time */
+	if (cpu_nodes > boot_cpu_node_count)
+		extra_size += (cpu_nodes - boot_cpu_node_count) * cpu_node_size();
+
+	/* Consider extra space for reserved memory ranges if any */
+	if (rmem->nr_ranges > 0)
+		extra_size += sizeof(struct fdt_reserve_entry) * rmem->nr_ranges;
+
+	return extra_size + kdump_extra_fdt_size_ppc64(image, cpu_nodes);
 }
 
 static int copy_property(void *fdt, int node_offset, const struct device_node *dn,
@@ -924,18 +736,13 @@ static int update_pci_dma_nodes(void *fdt, const char *dmapropname)
  *                       being loaded.
  * @image:               kexec image being loaded.
  * @fdt:                 Flattened device tree for the next kernel.
- * @initrd_load_addr:    Address where the next initrd will be loaded.
- * @initrd_len:          Size of the next initrd, or 0 if there will be none.
- * @cmdline:             Command line for the next kernel, or NULL if there will
- *                       be none.
+ * @rmem:                Reserved memory ranges.
  *
  * Returns 0 on success, negative errno on error.
  */
-int setup_new_fdt_ppc64(const struct kimage *image, void *fdt,
-			unsigned long initrd_load_addr,
-			unsigned long initrd_len, const char *cmdline)
+int setup_new_fdt_ppc64(const struct kimage *image, void *fdt, struct crash_mem *rmem)
 {
-	struct crash_mem *umem = NULL, *rmem = NULL;
+	struct crash_mem *umem = NULL;
 	int i, nr_ranges, ret;
 
 #ifdef CONFIG_CRASH_DUMP
@@ -991,10 +798,6 @@ int setup_new_fdt_ppc64(const struct kimage *image, void *fdt,
 		goto out;
 
 	/* Update memory reserve map */
-	ret = get_reserved_memory_ranges(&rmem);
-	if (ret)
-		goto out;
-
 	nr_ranges = rmem ? rmem->nr_ranges : 0;
 	for (i = 0; i < nr_ranges; i++) {
 		u64 base, size;
@@ -1014,66 +817,7 @@ int setup_new_fdt_ppc64(const struct kimage *image, void *fdt,
 		ret = plpks_populate_fdt(fdt);
 
 out:
-	kfree(rmem);
 	kfree(umem);
-	return ret;
-}
-
-/**
- * arch_kexec_locate_mem_hole - Skip special memory regions like rtas, opal,
- *                              tce-table, reserved-ranges & such (exclude
- *                              memory ranges) as they can't be used for kexec
- *                              segment buffer. Sets kbuf->mem when a suitable
- *                              memory hole is found.
- * @kbuf:                       Buffer contents and memory parameters.
- *
- * Assumes minimum of PAGE_SIZE alignment for kbuf->memsz & kbuf->buf_align.
- *
- * Returns 0 on success, negative errno on error.
- */
-int arch_kexec_locate_mem_hole(struct kexec_buf *kbuf)
-{
-	struct crash_mem **emem;
-	u64 buf_min, buf_max;
-	int ret;
-
-	/* Look up the exclude ranges list while locating the memory hole */
-	emem = &(kbuf->image->arch.exclude_ranges);
-	if (!(*emem) || ((*emem)->nr_ranges == 0)) {
-		pr_warn("No exclude range list. Using the default locate mem hole method\n");
-		return kexec_locate_mem_hole(kbuf);
-	}
-
-	buf_min = kbuf->buf_min;
-	buf_max = kbuf->buf_max;
-	/* Segments for kdump kernel should be within crashkernel region */
-	if (IS_ENABLED(CONFIG_CRASH_DUMP) && kbuf->image->type == KEXEC_TYPE_CRASH) {
-		buf_min = (buf_min < crashk_res.start ?
-			   crashk_res.start : buf_min);
-		buf_max = (buf_max > crashk_res.end ?
-			   crashk_res.end : buf_max);
-	}
-
-	if (buf_min > buf_max) {
-		pr_err("Invalid buffer min and/or max values\n");
-		return -EINVAL;
-	}
-
-	if (kbuf->top_down)
-		ret = locate_mem_hole_top_down_ppc64(kbuf, buf_min, buf_max,
-						     *emem);
-	else
-		ret = locate_mem_hole_bottom_up_ppc64(kbuf, buf_min, buf_max,
-						      *emem);
-
-	/* Add the buffer allocated to the exclude list for the next lookup */
-	if (!ret) {
-		add_mem_range(emem, kbuf->mem, kbuf->memsz);
-		sort_memory_ranges(*emem, true);
-	} else {
-		pr_err("Failed to locate memory buffer of size %lu\n",
-		       kbuf->memsz);
-	}
 	return ret;
 }
 

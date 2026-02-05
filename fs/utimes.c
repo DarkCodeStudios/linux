@@ -22,7 +22,7 @@ int vfs_utimes(const struct path *path, struct timespec64 *times)
 	int error;
 	struct iattr newattrs;
 	struct inode *inode = path->dentry->d_inode;
-	struct inode *delegated_inode = NULL;
+	struct delegated_inode delegated_inode = { };
 
 	if (times) {
 		if (!nsec_valid(times[0].tv_nsec) ||
@@ -66,7 +66,7 @@ retry_deleg:
 	error = notify_change(mnt_idmap(path->mnt), path->dentry, &newattrs,
 			      &delegated_inode);
 	inode_unlock(inode);
-	if (delegated_inode) {
+	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;
@@ -76,6 +76,7 @@ retry_deleg:
 out:
 	return error;
 }
+EXPORT_SYMBOL_GPL(vfs_utimes);
 
 static int do_utimes_path(int dfd, const char __user *filename,
 		struct timespec64 *times, int flags)
@@ -108,18 +109,13 @@ retry:
 
 static int do_utimes_fd(int fd, struct timespec64 *times, int flags)
 {
-	struct fd f;
-	int error;
-
 	if (flags)
 		return -EINVAL;
 
-	f = fdget(fd);
-	if (!f.file)
+	CLASS(fd, f)(fd);
+	if (fd_empty(f))
 		return -EBADF;
-	error = vfs_utimes(&f.file->f_path, times);
-	fdput(f);
-	return error;
+	return vfs_utimes(&fd_file(f)->f_path, times);
 }
 
 /*

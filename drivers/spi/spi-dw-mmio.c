@@ -321,11 +321,6 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 	struct dw_spi *dws;
 	int ret;
 
-	if (device_property_read_bool(&pdev->dev, "spi-slave")) {
-		dev_warn(&pdev->dev, "spi-slave is not yet supported\n");
-		return -ENODEV;
-	}
-
 	dwsmmio = devm_kzalloc(&pdev->dev, sizeof(struct dw_spi_mmio),
 			GFP_KERNEL);
 	if (!dwsmmio)
@@ -358,7 +353,9 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 	if (IS_ERR(dwsmmio->rstc))
 		return PTR_ERR(dwsmmio->rstc);
 
-	reset_control_deassert(dwsmmio->rstc);
+	ret = reset_control_deassert(dwsmmio->rstc);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to deassert resets\n");
 
 	dws->bus_num = pdev->id;
 
@@ -380,7 +377,7 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(&pdev->dev);
 
-	ret = dw_spi_add_host(&pdev->dev, dws);
+	ret = dw_spi_add_controller(&pdev->dev, dws);
 	if (ret)
 		goto out;
 
@@ -399,7 +396,7 @@ static void dw_spi_mmio_remove(struct platform_device *pdev)
 {
 	struct dw_spi_mmio *dwsmmio = platform_get_drvdata(pdev);
 
-	dw_spi_remove_host(&dwsmmio->dws);
+	dw_spi_remove_controller(&dwsmmio->dws);
 	pm_runtime_disable(&pdev->dev);
 	reset_control_assert(dwsmmio->rstc);
 }
@@ -433,7 +430,7 @@ MODULE_DEVICE_TABLE(acpi, dw_spi_mmio_acpi_match);
 
 static struct platform_driver dw_spi_mmio_driver = {
 	.probe		= dw_spi_mmio_probe,
-	.remove_new	= dw_spi_mmio_remove,
+	.remove		= dw_spi_mmio_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
 		.of_match_table = dw_spi_mmio_of_match,
@@ -445,4 +442,4 @@ module_platform_driver(dw_spi_mmio_driver);
 MODULE_AUTHOR("Jean-Hugues Deschenes <jean-hugues.deschenes@octasic.com>");
 MODULE_DESCRIPTION("Memory-mapped I/O interface driver for DW SPI Core");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SPI_DW_CORE);
+MODULE_IMPORT_NS("SPI_DW_CORE");

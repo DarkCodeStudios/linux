@@ -25,7 +25,7 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/machine.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define BCOVE_GPADCREQ			0xDC
 #define BCOVE_GPADCREQ_BUSY		BIT(0)
@@ -81,8 +81,8 @@ static int mrfld_adc_single_conv(struct iio_dev *indio_dev,
 
 	reinit_completion(&adc->completion);
 
-	regmap_update_bits(regmap, BCOVE_MADCIRQ, BCOVE_ADCIRQ_ALL, 0);
-	regmap_update_bits(regmap, BCOVE_MIRQLVL1, BCOVE_LVL1_ADC, 0);
+	regmap_clear_bits(regmap, BCOVE_MADCIRQ, BCOVE_ADCIRQ_ALL);
+	regmap_clear_bits(regmap, BCOVE_MIRQLVL1, BCOVE_LVL1_ADC);
 
 	ret = regmap_read_poll_timeout(regmap, BCOVE_GPADCREQ, req,
 				       !(req & BCOVE_GPADCREQ_BUSY),
@@ -164,7 +164,7 @@ static const struct iio_chan_spec mrfld_adc_channels[] = {
 	BCOVE_ADC_CHANNEL(IIO_TEMP,       8, "CH8", 0xC6),
 };
 
-static struct iio_map iio_maps[] = {
+static const struct iio_map iio_maps[] = {
 	IIO_MAP("CH0", "bcove-battery", "VBATRSLT"),
 	IIO_MAP("CH1", "bcove-battery", "BATTID"),
 	IIO_MAP("CH2", "bcove-battery", "IBATRSLT"),
@@ -174,7 +174,7 @@ static struct iio_map iio_maps[] = {
 	IIO_MAP("CH6", "bcove-temp",    "SYSTEMP0"),
 	IIO_MAP("CH7", "bcove-temp",    "SYSTEMP1"),
 	IIO_MAP("CH8", "bcove-temp",    "SYSTEMP2"),
-	{}
+	{ }
 };
 
 static int mrfld_adc_probe(struct platform_device *pdev)
@@ -222,7 +222,7 @@ static int mrfld_adc_probe(struct platform_device *pdev)
 
 static const struct platform_device_id mrfld_adc_id_table[] = {
 	{ .name = "mrfld_bcove_adc" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, mrfld_adc_id_table);
 

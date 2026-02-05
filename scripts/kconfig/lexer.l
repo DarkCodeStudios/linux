@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <xalloc.h>
 #include "lkc.h"
 #include "preprocess.h"
 
@@ -125,6 +126,7 @@ n	[A-Za-z0-9_-]
 "select"		return T_SELECT;
 "source"		return T_SOURCE;
 "string"		return T_STRING;
+"transitional"		return T_TRANSITIONAL;
 "tristate"		return T_TRISTATE;
 "visible"		return T_VISIBLE;
 "||"			return T_OR;

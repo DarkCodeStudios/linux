@@ -76,7 +76,7 @@ Don't use commas to avoid using braces:
 	if (condition)
 		do_this(), do_that();
 
-Always uses braces for multiple statements:
+Always use braces for multiple statements:
 
 .. code-block:: c
 
@@ -614,7 +614,10 @@ it.
 
 When commenting the kernel API functions, please use the kernel-doc format.
 See the files at :ref:`Documentation/doc-guide/ <doc_guide>` and
-``scripts/kernel-doc`` for details.
+``scripts/kernel-doc`` for details. Note that the danger of over-commenting
+applies to kernel-doc comments all the same. Do not add boilerplate
+kernel-doc which simply reiterates what's obvious from the signature
+of the function.
 
 The preferred style for long (multi-line) comments is:
 
@@ -627,18 +630,6 @@ The preferred style for long (multi-line) comments is:
 	 *
 	 * Description:  A column of asterisks on the left side,
 	 * with beginning and ending almost-blank lines.
-	 */
-
-For files in net/ and drivers/net/ the preferred style for long (multi-line)
-comments is a little different.
-
-.. code-block:: c
-
-	/* The preferred comment style for files in net/ and drivers/net
-	 * looks like this.
-	 *
-	 * It is nearly the same as the generally preferred comment style,
-	 * but there is no initial almost-blank line.
 	 */
 
 It's also important to comment data, whether they are basic types or derived
@@ -732,7 +723,7 @@ these rules, to quickly re-format parts of your code automatically,
 and to review full files in order to spot coding style mistakes,
 typos and possible improvements. It is also handy for sorting ``#includes``,
 for aligning variables/macros, for reflowing text and other similar tasks.
-See the file :ref:`Documentation/process/clang-format.rst <clangformat>`
+See the file :ref:`Documentation/dev-tools/clang-format.rst <clangformat>`
 for more details.
 
 Some basic editor settings, such as indentation and line endings, will be
@@ -998,7 +989,7 @@ that can go into these 5 milliseconds.
 
 A reasonable rule of thumb is to not put inline at functions that have more
 than 3 lines of code in them. An exception to this rule are the cases where
-a parameter is known to be a compiletime constant, and as a result of this
+a parameter is known to be a compile time constant, and as a result of this
 constantness you *know* the compiler will be able to optimize most of your
 function away at compile time. For a good example of this later case, see
 the kmalloc() inline function.

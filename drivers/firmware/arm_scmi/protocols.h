@@ -22,7 +22,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define PROTOCOL_REV_MINOR_MASK	GENMASK(15, 0)
 #define PROTOCOL_REV_MAJOR_MASK	GENMASK(31, 16)
@@ -30,6 +30,8 @@
 #define PROTOCOL_REV_MINOR(x)	((u16)(FIELD_GET(PROTOCOL_REV_MINOR_MASK, (x))))
 
 #define SCMI_PROTOCOL_VENDOR_BASE	0x80
+
+#define MSG_SUPPORTS_FASTCHANNEL(x)	((x) & BIT(0))
 
 enum scmi_common_cmd {
 	PROTOCOL_VERSION = 0x0,

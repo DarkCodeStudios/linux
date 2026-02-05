@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2014, 2018-2024 Intel Corporation
+ * Copyright (C) 2005-2014, 2018-2025 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016 Intel Deutschland GmbH
  */
@@ -96,7 +96,7 @@
 #define DTSC_PTAT_AVG		(0x00a10650)
 
 
-/**
+/*
  * Tx Scheduler
  *
  * The Tx Scheduler selects the next frame to be transmitted, choosing TFDs
@@ -169,7 +169,7 @@
  */
 #define SCD_MEM_LOWER_BOUND		(0x0000)
 
-/**
+/*
  * Max Tx window size is the max number of contiguous TFDs that the scheduler
  * can keep track of at one time when creating block-ack chains of frames.
  * Note that "64" matches the number of ack bits in a block-ack packet.
@@ -381,6 +381,10 @@ enum {
 #define CNVR_SCU_SD_REGS_SD_REG_ACTIVE_VDIG_MIRROR	0xA29938
 #define CNVI_SCU_SEQ_DATA_DW9				0xA27488
 
+#define CNVI_SCU_REG_FOR_ECO_1				0xA26EF8
+#define   CNVI_SCU_REG_FOR_ECO_1_WIAMT_KNOWN		BIT(4)
+#define   CNVI_SCU_REG_FOR_ECO_1_WIAMT_PRESENT		BIT(5)
+
 #define CNVI_PMU_STEP_FLOW				0xA2D588
 #define CNVI_PMU_STEP_FLOW_FORCE_URM			BIT(2)
 
@@ -458,6 +462,7 @@ enum {
 #define REG_CRF_ID_TYPE_GF			0x410
 #define REG_CRF_ID_TYPE_FM			0x910
 #define REG_CRF_ID_TYPE_WHP			0xA10
+#define REG_CRF_ID_TYPE_PE			0xA30
 
 #define HPM_DEBUG			0xA03440
 #define PERSISTENCE_BIT			BIT(12)
@@ -509,6 +514,14 @@ enum {
 #define WMAL_INDRCT_CMD(addr) \
 	((WMAL_CMD_READ_BURST_ACCESS << WMAL_INDRCT_RD_CMD1_OPMOD_POS) | \
 	 ((addr) & WMAL_INDRCT_RD_CMD1_BYTE_ADDRESS_MSK))
+#define WMAL_MRSPF_STTS 0xADFC24
+#define WMAL_MRSPF_STTS_FIFO1_NOT_EMPTY_POS 15
+#define WMAL_MRSPF_STTS_FIFO1_NOT_EMPTY_MSK 0x8000
+#define WMAL_TIMEOUT_VAL 0xA5A5A5A2
+#define WMAL_MRSPF_STTS_IS_FIFO1_NOT_EMPTY(val) \
+	(((val) >> (WMAL_MRSPF_STTS_FIFO1_NOT_EMPTY_POS)) & \
+	 ((WMAL_MRSPF_STTS_FIFO1_NOT_EMPTY_MSK) >> \
+	  (WMAL_MRSPF_STTS_FIFO1_NOT_EMPTY_POS)))
 
 #define WFPM_LMAC1_PS_CTL_RW 0xA03380
 #define WFPM_LMAC2_PS_CTL_RW 0xA033C0

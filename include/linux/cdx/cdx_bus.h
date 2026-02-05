@@ -211,7 +211,7 @@ struct cdx_driver {
 };
 
 #define to_cdx_driver(_drv) \
-	container_of(_drv, struct cdx_driver, driver)
+	container_of_const(_drv, struct cdx_driver, driver)
 
 /* Macro to avoid include chaining to get THIS_MODULE */
 #define cdx_driver_register(drv) \
@@ -234,7 +234,7 @@ int __must_check __cdx_driver_register(struct cdx_driver *cdx_driver,
  */
 void cdx_driver_unregister(struct cdx_driver *cdx_driver);
 
-extern struct bus_type cdx_bus_type;
+extern const struct bus_type cdx_bus_type;
 
 /**
  * cdx_dev_reset - Reset CDX device

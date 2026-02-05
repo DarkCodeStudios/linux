@@ -1,3 +1,5 @@
+.. _sched_design_CFS:
+
 =============
 CFS Scheduler
 =============
@@ -6,10 +8,12 @@ CFS Scheduler
 1.  OVERVIEW
 ============
 
-CFS stands for "Completely Fair Scheduler," and is the new "desktop" process
-scheduler implemented by Ingo Molnar and merged in Linux 2.6.23.  It is the
-replacement for the previous vanilla scheduler's SCHED_OTHER interactivity
-code.
+CFS stands for "Completely Fair Scheduler," and is the "desktop" process
+scheduler implemented by Ingo Molnar and merged in Linux 2.6.23. When
+originally merged, it was the replacement for the previous vanilla
+scheduler's SCHED_OTHER interactivity code. Nowadays, CFS is making room
+for EEVDF, for which documentation can be found in
+Documentation/scheduler/sched-eevdf.rst.
 
 80% of CFS's design can be summed up in a single sentence: CFS basically models
 an "ideal, precise multi-tasking CPU" on real hardware.
@@ -92,7 +96,7 @@ picked and the current task is preempted.
 CFS uses nanosecond granularity accounting and does not rely on any jiffies or
 other HZ detail.  Thus the CFS scheduler has no notion of "timeslices" in the
 way the previous scheduler had, and has no heuristics whatsoever.  There is
-only one central tunable (you have to switch on CONFIG_SCHED_DEBUG):
+only one central tunable:
 
    /sys/kernel/debug/sched/base_slice_ns
 

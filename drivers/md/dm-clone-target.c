@@ -2020,7 +2020,7 @@ static void clone_resume(struct dm_target *ti)
 static void disable_passdown_if_not_supported(struct clone *clone)
 {
 	struct block_device *dest_dev = clone->dest_dev->bdev;
-	struct queue_limits *dest_limits = &bdev_get_queue(dest_dev)->limits;
+	struct queue_limits *dest_limits = bdev_limits(dest_dev);
 	const char *reason = NULL;
 
 	if (!test_bit(DM_CLONE_DISCARD_PASSDOWN, &clone->flags))
@@ -2041,7 +2041,7 @@ static void disable_passdown_if_not_supported(struct clone *clone)
 static void set_discard_limits(struct clone *clone, struct queue_limits *limits)
 {
 	struct block_device *dest_bdev = clone->dest_dev->bdev;
-	struct queue_limits *dest_limits = &bdev_get_queue(dest_bdev)->limits;
+	struct queue_limits *dest_limits = bdev_limits(dest_bdev);
 
 	if (!test_bit(DM_CLONE_DISCARD_PASSDOWN, &clone->flags)) {
 		/* No passdown is done so we set our own virtual limits */
@@ -2059,7 +2059,6 @@ static void set_discard_limits(struct clone *clone, struct queue_limits *limits)
 	limits->max_hw_discard_sectors = dest_limits->max_hw_discard_sectors;
 	limits->discard_granularity = dest_limits->discard_granularity;
 	limits->discard_alignment = dest_limits->discard_alignment;
-	limits->discard_misaligned = dest_limits->discard_misaligned;
 	limits->max_discard_segments = dest_limits->max_discard_segments;
 }
 
@@ -2074,8 +2073,8 @@ static void clone_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < clone->region_size ||
 	    do_div(io_opt_sectors, clone->region_size)) {
-		blk_limits_io_min(limits, clone->region_size << SECTOR_SHIFT);
-		blk_limits_io_opt(limits, clone->region_size << SECTOR_SHIFT);
+		limits->io_min = clone->region_size << SECTOR_SHIFT;
+		limits->io_opt = clone->region_size << SECTOR_SHIFT;
 	}
 
 	disable_passdown_if_not_supported(clone);

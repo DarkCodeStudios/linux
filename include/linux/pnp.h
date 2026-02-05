@@ -290,7 +290,7 @@ static inline void pnp_set_drvdata(struct pnp_dev *pdev, void *data)
 }
 
 struct pnp_fixup {
-	char id[7];
+	char id[8];
 	void (*quirk_function) (struct pnp_dev *dev);	/* fixup function */
 };
 
@@ -383,7 +383,7 @@ struct pnp_driver {
 	struct device_driver driver;
 };
 
-#define	to_pnp_driver(drv) container_of(drv, struct pnp_driver, driver)
+#define	to_pnp_driver(drv) container_of_const(drv, struct pnp_driver, driver)
 
 struct pnp_card_driver {
 	struct list_head global_list;

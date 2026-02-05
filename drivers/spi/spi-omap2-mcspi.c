@@ -27,6 +27,8 @@
 
 #include <linux/spi/spi.h>
 
+#include "internals.h"
+
 #include <linux/platform_data/spi-omap2-mcspi.h>
 
 #define OMAP2_MCSPI_MAX_FREQ		48000000
@@ -132,6 +134,7 @@ struct omap2_mcspi {
 	size_t			max_xfer_len;
 	u32			ref_clk_hz;
 	bool			use_multi_mode;
+	bool			last_msg_kept_cs;
 };
 
 struct omap2_mcspi_cs {
@@ -269,7 +272,6 @@ static void omap2_mcspi_set_cs(struct spi_device *spi, bool enable)
 
 		mcspi_write_chconf0(spi, l);
 
-		pm_runtime_mark_last_busy(mcspi->dev);
 		pm_runtime_put_autosuspend(mcspi->dev);
 	}
 }
@@ -986,6 +988,7 @@ static int omap2_mcspi_setup_transfer(struct spi_device *spi,
 	else
 		l &= ~OMAP2_MCSPI_CHCONF_PHA;
 
+	mcspi_write_chconf0(spi, l | OMAP2_MCSPI_CHCONF_FORCE);
 	mcspi_write_chconf0(spi, l);
 
 	cs->mode = spi->mode;
@@ -1099,7 +1102,6 @@ static int omap2_mcspi_setup(struct spi_device *spi)
 	if (ret && initial_setup)
 		omap2_mcspi_cleanup(spi);
 
-	pm_runtime_mark_last_busy(mcspi->dev);
 	pm_runtime_put_autosuspend(mcspi->dev);
 
 	return ret;
@@ -1208,8 +1210,7 @@ static int omap2_mcspi_transfer_one(struct spi_controller *ctlr,
 		unsigned	count;
 
 		if ((mcspi_dma->dma_rx && mcspi_dma->dma_tx) &&
-		    ctlr->cur_msg_mapped &&
-		    ctlr->can_dma(ctlr, spi, t))
+		    spi_xfer_is_dma_mapped(ctlr, spi, t))
 			omap2_mcspi_set_fifo(spi, t, 1);
 
 		omap2_mcspi_set_enable(spi, 1);
@@ -1220,8 +1221,7 @@ static int omap2_mcspi_transfer_one(struct spi_controller *ctlr,
 					+ OMAP2_MCSPI_TX0);
 
 		if ((mcspi_dma->dma_rx && mcspi_dma->dma_tx) &&
-		    ctlr->cur_msg_mapped &&
-		    ctlr->can_dma(ctlr, spi, t))
+		    spi_xfer_is_dma_mapped(ctlr, spi, t))
 			count = omap2_mcspi_txrx_dma(spi, t);
 		else
 			count = omap2_mcspi_txrx_pio(spi, t);
@@ -1269,6 +1269,10 @@ static int omap2_mcspi_prepare_message(struct spi_controller *ctlr,
 	 * multi-mode is applicable.
 	 */
 	mcspi->use_multi_mode = true;
+
+	if (mcspi->last_msg_kept_cs)
+		mcspi->use_multi_mode = false;
+
 	list_for_each_entry(tr, &msg->transfers, transfer_list) {
 		if (!tr->bits_per_word)
 			bits_per_word = msg->spi->bits_per_word;
@@ -1277,41 +1281,29 @@ static int omap2_mcspi_prepare_message(struct spi_controller *ctlr,
 
 		/*
 		 * Check if this transfer contains only one word;
-		 * OR contains 1 to 4 words, with bits_per_word == 8 and no delay between each word
-		 * OR contains 1 to 2 words, with bits_per_word == 16 and no delay between each word
-		 *
-		 * If one of the two last case is true, this also change the bits_per_word of this
-		 * transfer to make it a bit faster.
-		 * It's not an issue to change the bits_per_word here even if the multi-mode is not
-		 * applicable for this message, the signal on the wire will be the same.
 		 */
 		if (bits_per_word < 8 && tr->len == 1) {
 			/* multi-mode is applicable, only one word (1..7 bits) */
-		} else if (tr->word_delay.value == 0 && bits_per_word == 8 && tr->len <= 4) {
-			/* multi-mode is applicable, only one "bigger" word (8,16,24,32 bits) */
-			tr->bits_per_word = tr->len * bits_per_word;
-		} else if (tr->word_delay.value == 0 && bits_per_word == 16 && tr->len <= 2) {
-			/* multi-mode is applicable, only one "bigger" word (16,32 bits) */
-			tr->bits_per_word = tr->len * bits_per_word / 2;
 		} else if (bits_per_word >= 8 && tr->len == bits_per_word / 8) {
-			/* multi-mode is applicable, only one word (9..15,17..32 bits) */
+			/* multi-mode is applicable, only one word (8..32 bits) */
 		} else {
 			/* multi-mode is not applicable: more than one word in the transfer */
 			mcspi->use_multi_mode = false;
 		}
 
-		/* Check if transfer asks to change the CS status after the transfer */
-		if (!tr->cs_change)
-			mcspi->use_multi_mode = false;
-
-		/*
-		 * If at least one message is not compatible, switch back to single mode
-		 *
-		 * The bits_per_word of certain transfer can be different, but it will have no
-		 * impact on the signal itself.
-		 */
-		if (!mcspi->use_multi_mode)
-			break;
+		if (list_is_last(&tr->transfer_list, &msg->transfers)) {
+			/* Check if transfer asks to keep the CS status after the whole message */
+			if (tr->cs_change) {
+				mcspi->use_multi_mode = false;
+				mcspi->last_msg_kept_cs = true;
+			} else {
+				mcspi->last_msg_kept_cs = false;
+			}
+		} else {
+			/* Check if transfer asks to change the CS status after the transfer */
+			if (!tr->cs_change)
+				mcspi->use_multi_mode = false;
+		}
 	}
 
 	omap2_mcspi_set_mode(ctlr);
@@ -1386,7 +1378,6 @@ static int omap2_mcspi_controller_setup(struct omap2_mcspi *mcspi)
 	ctx->wakeupenable = OMAP2_MCSPI_WAKEUPENABLE_WKEN;
 
 	omap2_mcspi_set_mode(ctlr);
-	pm_runtime_mark_last_busy(mcspi->dev);
 	pm_runtime_put_autosuspend(mcspi->dev);
 	return 0;
 }
@@ -1574,6 +1565,11 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	}
 
 	mcspi->ref_clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
+	if (IS_ERR(mcspi->ref_clk)) {
+		status = PTR_ERR(mcspi->ref_clk);
+		dev_err_probe(&pdev->dev, status, "Failed to get ref_clk");
+		goto free_ctlr;
+	}
 	if (mcspi->ref_clk)
 		mcspi->ref_clk_hz = clk_get_rate(mcspi->ref_clk);
 	else
@@ -1667,8 +1663,9 @@ static struct platform_driver omap2_mcspi_driver = {
 		.of_match_table = omap_mcspi_of_match,
 	},
 	.probe =	omap2_mcspi_probe,
-	.remove_new =	omap2_mcspi_remove,
+	.remove =	omap2_mcspi_remove,
 };
 
 module_platform_driver(omap2_mcspi_driver);
+MODULE_DESCRIPTION("OMAP2 McSPI controller driver");
 MODULE_LICENSE("GPL");

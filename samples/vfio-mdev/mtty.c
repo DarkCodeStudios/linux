@@ -624,7 +624,7 @@ static void handle_bar_read(unsigned int index, struct mdev_state *mdev_state,
 		u8 lsr = 0;
 
 		mutex_lock(&mdev_state->rxtx_lock);
-		/* atleast one char in FIFO */
+		/* at least one char in FIFO */
 		if (mdev_state->s[index].rxtx.head !=
 				 mdev_state->s[index].rxtx.tail)
 			lsr |= UART_LSR_DR;
@@ -927,7 +927,6 @@ static const struct file_operations mtty_save_fops = {
 	.unlocked_ioctl = mtty_precopy_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
 	.release = mtty_release_migf,
-	.llseek = no_llseek,
 };
 
 static void mtty_save_state(struct mdev_state *mdev_state)
@@ -1082,7 +1081,6 @@ static const struct file_operations mtty_resume_fops = {
 	.owner = THIS_MODULE,
 	.write = mtty_resume_write,
 	.release = mtty_release_migf,
-	.llseek = no_llseek,
 };
 
 static struct mtty_migration_file *
@@ -1719,10 +1717,12 @@ static int mtty_set_irqs(struct mdev_state *mdev_state, uint32_t flags,
 	return ret;
 }
 
-static int mtty_get_region_info(struct mdev_state *mdev_state,
-			 struct vfio_region_info *region_info,
-			 u16 *cap_type_id, void **cap_type)
+static int mtty_ioctl_get_region_info(struct vfio_device *vdev,
+				      struct vfio_region_info *region_info,
+				      struct vfio_info_cap *caps)
 {
+	struct mdev_state *mdev_state =
+		container_of(vdev, struct mdev_state, vdev);
 	unsigned int size = 0;
 	u32 bar_index;
 
@@ -1813,30 +1813,6 @@ static long mtty_ioctl(struct vfio_device *vdev, unsigned int cmd,
 			return ret;
 
 		memcpy(&mdev_state->dev_info, &info, sizeof(info));
-
-		if (copy_to_user((void __user *)arg, &info, minsz))
-			return -EFAULT;
-
-		return 0;
-	}
-	case VFIO_DEVICE_GET_REGION_INFO:
-	{
-		struct vfio_region_info info;
-		u16 cap_type_id = 0;
-		void *cap_type = NULL;
-
-		minsz = offsetofend(struct vfio_region_info, offset);
-
-		if (copy_from_user(&info, (void __user *)arg, minsz))
-			return -EFAULT;
-
-		if (info.argsz < minsz)
-			return -EINVAL;
-
-		ret = mtty_get_region_info(mdev_state, &info, &cap_type_id,
-					   &cap_type);
-		if (ret)
-			return ret;
 
 		if (copy_to_user((void __user *)arg, &info, minsz))
 			return -EFAULT;
@@ -1951,6 +1927,7 @@ static const struct vfio_device_ops mtty_dev_ops = {
 	.read = mtty_read,
 	.write = mtty_write,
 	.ioctl = mtty_ioctl,
+	.get_region_info_caps = mtty_ioctl_get_region_info,
 	.bind_iommufd	= vfio_iommufd_emulated_bind,
 	.unbind_iommufd	= vfio_iommufd_emulated_unbind,
 	.attach_ioas	= vfio_iommufd_emulated_attach_ioas,
@@ -2058,6 +2035,6 @@ module_init(mtty_dev_init)
 module_exit(mtty_dev_exit)
 
 MODULE_LICENSE("GPL v2");
-MODULE_INFO(supported, "Test driver that simulate serial port over PCI");
+MODULE_DESCRIPTION("Test driver that simulate serial port over PCI");
 MODULE_VERSION(VERSION_STRING);
 MODULE_AUTHOR(DRIVER_AUTHOR);

@@ -44,8 +44,9 @@
 #define WIDGET_IS_AIF_OR_DAI(id) (WIDGET_IS_DAI(id) || WIDGET_IS_AIF(id))
 #define WIDGET_IS_COPIER(id) (WIDGET_IS_AIF_OR_DAI(id) || (id) == snd_soc_dapm_buffer)
 
-#define SOF_DAI_CLK_INTEL_SSP_MCLK	0
-#define SOF_DAI_CLK_INTEL_SSP_BCLK	1
+#define SOF_DAI_PARAM_INTEL_SSP_MCLK		0
+#define SOF_DAI_PARAM_INTEL_SSP_BCLK		1
+#define SOF_DAI_PARAM_INTEL_SSP_TDM_SLOTS	2
 
 enum sof_widget_op {
 	SOF_WIDGET_PREPARE,
@@ -208,7 +209,7 @@ struct sof_ipc_tplg_widget_ops {
  * @widget_setup: Function pointer for setting up setup in the DSP
  * @widget_free: Function pointer for freeing widget in the DSP
  * @dai_config: Function pointer for sending DAI config IPC to the DSP
- * @dai_get_clk: Function pointer for getting the DAI clock setting
+ * @dai_get_param: Function pointer for getting the DAI parameter
  * @set_up_all_pipelines: Function pointer for setting up all topology pipelines
  * @tear_down_all_pipelines: Function pointer for tearing down all topology pipelines
  * @parse_manifest: Function pointer for ipc4 specific parsing of topology manifest
@@ -229,7 +230,7 @@ struct sof_ipc_tplg_ops {
 	int (*widget_free)(struct snd_sof_dev *sdev, struct snd_sof_widget *swidget);
 	int (*dai_config)(struct snd_sof_dev *sdev, struct snd_sof_widget *swidget,
 			  unsigned int flags, struct snd_sof_dai_config_data *data);
-	int (*dai_get_clk)(struct snd_sof_dev *sdev, struct snd_sof_dai *dai, int clk_type);
+	int (*dai_get_param)(struct snd_sof_dev *sdev, struct snd_sof_dai *dai, int param_type);
 	int (*set_up_all_pipelines)(struct snd_sof_dev *sdev, bool verify);
 	int (*tear_down_all_pipelines)(struct snd_sof_dev *sdev, bool verify);
 	int (*parse_manifest)(struct snd_soc_component *scomp, int index,
@@ -313,12 +314,12 @@ struct sof_token_info {
 
 /**
  * struct snd_sof_pcm_stream_pipeline_list - List of pipelines associated with a PCM stream
- * @count: number of pipeline widgets in the @pipe_widgets array
  * @pipelines: array of pipelines
+ * @count: number of pipeline widgets in the @pipe_widgets array
  */
 struct snd_sof_pcm_stream_pipeline_list {
-	u32 count;
 	struct snd_sof_pipeline **pipelines;
+	u32 count;
 };
 
 /* PCM stream, mapped to FW component  */
@@ -331,6 +332,7 @@ struct snd_sof_pcm_stream {
 	struct work_struct period_elapsed_work;
 	struct snd_soc_dapm_widget_list *list; /* list of connected DAPM widgets */
 	bool d0i3_compatible; /* DSP can be in D0I3 when this pcm is opened */
+	bool pause_supported; /* PCM device supports PAUSE operation */
 	unsigned int dsp_max_burst_size_in_ms; /* The maximum size of the host DMA burst in ms */
 	/*
 	 * flag to indicate that the DSP pipelines should be kept
@@ -346,12 +348,14 @@ struct snd_sof_pcm_stream {
 /* ALSA SOF PCM device */
 struct snd_sof_pcm {
 	struct snd_soc_component *scomp;
-	struct snd_soc_tplg_pcm pcm;
 	struct snd_sof_pcm_stream stream[2];
 	struct list_head list;	/* list in sdev pcm list */
 	struct snd_pcm_hw_params params[2];
 	bool prepared[2]; /* PCM_PARAMS set successfully */
 	bool pending_stop[2]; /* only used if (!pcm_ops->platform_stop_during_hw_free) */
+
+	/* Must be last - ends in a flex-array member. */
+	struct snd_soc_tplg_pcm pcm;
 };
 
 struct snd_sof_led_control {
@@ -446,6 +450,9 @@ struct snd_sof_widget {
 	 * from D3.
 	 */
 	bool dynamic_pipeline_widget;
+
+	/* Scheduling domain (enum sof_comp_domain), unset, Low Latency, or Data Processing */
+	u32 comp_domain;
 
 	struct snd_soc_dapm_widget *widget;
 	struct list_head list;	/* list in sdev widget list */
@@ -613,6 +620,25 @@ struct snd_sof_pcm *snd_sof_find_spcm_comp(struct snd_soc_component *scomp,
 void snd_sof_pcm_period_elapsed(struct snd_pcm_substream *substream);
 void snd_sof_pcm_init_elapsed_work(struct work_struct *work);
 
+/*
+ * snd_sof_pcm specific wrappers for dev_dbg() and dev_err() to provide
+ * consistent and useful prints.
+ */
+#define spcm_dbg(__spcm, __dir, __fmt, ...)					\
+	dev_dbg((__spcm)->scomp->dev, "pcm%u (%s), dir %d: " __fmt,		\
+		(__spcm)->pcm.pcm_id, (__spcm)->pcm.pcm_name, __dir,		\
+		##__VA_ARGS__)
+
+#define spcm_dbg_ratelimited(__spcm, __dir, __fmt, ...)				\
+	dev_dbg_ratelimited((__spcm)->scomp->dev, "pcm%u (%s), dir %d: " __fmt,	\
+		(__spcm)->pcm.pcm_id, (__spcm)->pcm.pcm_name, __dir,		\
+		##__VA_ARGS__)
+
+#define spcm_err(__spcm, __dir, __fmt, ...)					\
+	dev_err((__spcm)->scomp->dev, "%s: pcm%u (%s), dir %d: " __fmt,		\
+		__func__, (__spcm)->pcm.pcm_id, (__spcm)->pcm.pcm_name, __dir,	\
+		##__VA_ARGS__)
+
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_COMPRESS)
 void snd_sof_compr_fragment_elapsed(struct snd_compr_stream *cstream);
 void snd_sof_compr_init_elapsed_work(struct work_struct *work);
@@ -645,8 +671,7 @@ int sof_widget_list_setup(struct snd_sof_dev *sdev, struct snd_sof_pcm *spcm,
 int sof_widget_list_free(struct snd_sof_dev *sdev, struct snd_sof_pcm *spcm, int dir);
 int sof_pcm_dsp_pcm_free(struct snd_pcm_substream *substream, struct snd_sof_dev *sdev,
 			 struct snd_sof_pcm *spcm);
-int sof_pcm_stream_free(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream,
-			struct snd_sof_pcm *spcm, int dir, bool free_widget_list);
+int sof_pcm_free_all_streams(struct snd_sof_dev *sdev);
 int get_token_u32(void *elem, void *object, u32 offset);
 int get_token_u16(void *elem, void *object, u32 offset);
 int get_token_comp_format(void *elem, void *object, u32 offset);

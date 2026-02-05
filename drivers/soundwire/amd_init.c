@@ -8,6 +8,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/export.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -69,7 +70,6 @@ static struct sdw_amd_ctx *sdw_amd_probe_controller(struct sdw_amd_res *res)
 {
 	struct sdw_amd_ctx *ctx;
 	struct acpi_device *adev;
-	struct resource *sdw_res;
 	struct acp_sdw_pdata sdw_pdata[2];
 	struct platform_device_info pdevinfo[2];
 	u32 link_mask;
@@ -104,7 +104,8 @@ static struct sdw_amd_ctx *sdw_amd_probe_controller(struct sdw_amd_res *res)
 
 	ctx->count = count;
 	ctx->link_mask = res->link_mask;
-	sdw_res = kzalloc(sizeof(*sdw_res), GFP_KERNEL);
+	struct resource *sdw_res __free(kfree) = kzalloc(sizeof(*sdw_res),
+							 GFP_KERNEL);
 	if (!sdw_res) {
 		kfree(ctx);
 		return NULL;
@@ -120,6 +121,7 @@ static struct sdw_amd_ctx *sdw_amd_probe_controller(struct sdw_amd_res *res)
 
 		sdw_pdata[index].instance = index;
 		sdw_pdata[index].acp_sdw_lock = res->acp_lock;
+		sdw_pdata[index].acp_rev = res->acp_rev;
 		pdevinfo[index].name = "amd_sdw_manager";
 		pdevinfo[index].id = index;
 		pdevinfo[index].parent = res->parent;
@@ -132,7 +134,6 @@ static struct sdw_amd_ctx *sdw_amd_probe_controller(struct sdw_amd_res *res)
 		if (IS_ERR(ctx->pdev[index]))
 			goto err;
 	}
-	kfree(sdw_res);
 	return ctx;
 err:
 	while (index--) {
@@ -142,7 +143,6 @@ err:
 		platform_device_unregister(ctx->pdev[index]);
 	}
 
-	kfree(sdw_res);
 	kfree(ctx);
 	return NULL;
 }
@@ -173,15 +173,15 @@ int sdw_amd_probe(struct sdw_amd_res *res, struct sdw_amd_ctx **sdw_ctx)
 
 	return sdw_amd_startup(*sdw_ctx);
 }
-EXPORT_SYMBOL_NS(sdw_amd_probe, SOUNDWIRE_AMD_INIT);
+EXPORT_SYMBOL_NS(sdw_amd_probe, "SOUNDWIRE_AMD_INIT");
 
 void sdw_amd_exit(struct sdw_amd_ctx *ctx)
 {
 	sdw_amd_cleanup(ctx);
-	kfree(ctx->ids);
+	kfree(ctx->peripherals);
 	kfree(ctx);
 }
-EXPORT_SYMBOL_NS(sdw_amd_exit, SOUNDWIRE_AMD_INIT);
+EXPORT_SYMBOL_NS(sdw_amd_exit, "SOUNDWIRE_AMD_INIT");
 
 int sdw_amd_get_slave_info(struct sdw_amd_ctx *ctx)
 {
@@ -205,10 +205,11 @@ int sdw_amd_get_slave_info(struct sdw_amd_ctx *ctx)
 			num_slaves++;
 	}
 
-	ctx->ids = kcalloc(num_slaves, sizeof(*ctx->ids), GFP_KERNEL);
-	if (!ctx->ids)
+	ctx->peripherals = kmalloc(struct_size(ctx->peripherals, array, num_slaves),
+				   GFP_KERNEL);
+	if (!ctx->peripherals)
 		return -ENOMEM;
-	ctx->num_slaves = num_slaves;
+	ctx->peripherals->num_peripherals = num_slaves;
 	for (index = 0; index < ctx->count; index++) {
 		if (!(ctx->link_mask & BIT(index)))
 			continue;
@@ -216,15 +217,14 @@ int sdw_amd_get_slave_info(struct sdw_amd_ctx *ctx)
 		if (amd_manager) {
 			bus = &amd_manager->bus;
 			list_for_each_entry(slave, &bus->slaves, node) {
-				ctx->ids[i].id = slave->id;
-				ctx->ids[i].link_id = bus->link_id;
+				ctx->peripherals->array[i] = slave;
 				i++;
 			}
 		}
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS(sdw_amd_get_slave_info, SOUNDWIRE_AMD_INIT);
+EXPORT_SYMBOL_NS(sdw_amd_get_slave_info, "SOUNDWIRE_AMD_INIT");
 
 MODULE_AUTHOR("Vijendar.Mukunda@amd.com");
 MODULE_DESCRIPTION("AMD SoundWire Init Library");

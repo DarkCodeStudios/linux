@@ -32,7 +32,8 @@ find_cmd = $(find_all_cmd) | \
 		sed 's|^$(srctree)/||' | \
 		grep -F -e "$(subst :," -e ",$(DT_SCHEMA_FILES))" | \
 		sed 's|^|$(srctree)/|'
-CHK_DT_EXAMPLES := $(patsubst $(srctree)/%.yaml,%.example.dtb, $(shell $(find_cmd)))
+CHK_DT_EXAMPLES := $(patsubst $(srctree)/%.yaml,%.example.dtb, \
+			      $(shell $(find_cmd) | xargs grep -l '^examples:'))
 
 quiet_cmd_yamllint = LINT    $(src)
       cmd_yamllint = ($(find_cmd) | \
@@ -56,7 +57,6 @@ DT_DOCS = $(patsubst $(srctree)/%,%,$(shell $(find_all_cmd)))
 override DTC_FLAGS := \
 	-Wno-avoid_unnecessary_addr_size \
 	-Wno-graph_child_address \
-	-Wno-interrupt_provider \
 	-Wno-unique_unit_address \
 	-Wunique_unit_address_if_enabled
 

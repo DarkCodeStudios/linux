@@ -395,11 +395,6 @@ apply_relocate(Elf32_Shdr *sechdrs, const char *strtab, unsigned int symindex,
 	return 0;
 }
 
-struct mod_unwind_map {
-	const Elf_Shdr *unw_sec;
-	const Elf_Shdr *txt_sec;
-};
-
 static const Elf_Shdr *find_mod_section(const Elf32_Ehdr *hdr,
 	const Elf_Shdr *sechdrs, const char *name)
 {
@@ -489,7 +484,7 @@ module_arch_cleanup(struct module *mod)
 #endif
 }
 
-void __weak module_arch_freeing_init(struct module *mod)
+void module_arch_freeing_init(struct module *mod)
 {
 #ifdef CONFIG_ARM_UNWIND
 	struct unwind_table *init = mod->arch.init_table;

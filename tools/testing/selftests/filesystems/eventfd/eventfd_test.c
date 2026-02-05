@@ -11,7 +11,9 @@
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
-#include "../../kselftest_harness.h"
+#include "kselftest_harness.h"
+
+#define EVENTFD_TEST_ITERATIONS 100000UL
 
 struct error {
 	int  code;
@@ -40,7 +42,7 @@ static inline int sys_eventfd2(unsigned int count, int flags)
 	return syscall(__NR_eventfd2, count, flags);
 }
 
-TEST(eventfd01)
+TEST(eventfd_check_flag_rdwr)
 {
 	int fd, flags;
 
@@ -48,13 +50,13 @@ TEST(eventfd01)
 	ASSERT_GE(fd, 0);
 
 	flags = fcntl(fd, F_GETFL);
-	// since the kernel automatically added O_RDWR.
+	// The kernel automatically adds the O_RDWR flag.
 	EXPECT_EQ(flags, O_RDWR);
 
 	close(fd);
 }
 
-TEST(eventfd02)
+TEST(eventfd_check_flag_cloexec)
 {
 	int fd, flags;
 
@@ -68,7 +70,7 @@ TEST(eventfd02)
 	close(fd);
 }
 
-TEST(eventfd03)
+TEST(eventfd_check_flag_nonblock)
 {
 	int fd, flags;
 
@@ -83,7 +85,7 @@ TEST(eventfd03)
 	close(fd);
 }
 
-TEST(eventfd04)
+TEST(eventfd_check_flag_cloexec_and_nonblock)
 {
 	int fd, flags;
 
@@ -161,7 +163,7 @@ static int verify_fdinfo(int fd, struct error *err, const char *prefix,
 	return 0;
 }
 
-TEST(eventfd05)
+TEST(eventfd_check_flag_semaphore)
 {
 	struct error err = {0};
 	int fd, ret;
@@ -176,9 +178,132 @@ TEST(eventfd05)
 	// The semaphore could only be obtained from fdinfo.
 	ret = verify_fdinfo(fd, &err, "eventfd-semaphore: ", 19, "1\n");
 	if (ret != 0)
-		ksft_print_msg("eventfd-semaphore check failed, msg: %s\n",
-				err.msg);
+		ksft_print_msg("eventfd semaphore flag check failed: %s\n", err.msg);
 	EXPECT_EQ(ret, 0);
+
+	close(fd);
+}
+
+/*
+ * A write(2) fails with the error EINVAL if the size of the supplied buffer
+ * is less than 8 bytes, or if an attempt is made to write the value
+ * 0xffffffffffffffff.
+ */
+TEST(eventfd_check_write)
+{
+	uint64_t value = 1;
+	ssize_t size;
+	int fd;
+
+	fd = sys_eventfd2(0, 0);
+	ASSERT_GE(fd, 0);
+
+	size = write(fd, &value, sizeof(int));
+	EXPECT_EQ(size, -1);
+	EXPECT_EQ(errno, EINVAL);
+
+	size = write(fd, &value, sizeof(value));
+	EXPECT_EQ(size, sizeof(value));
+
+	value = (uint64_t)-1;
+	size = write(fd, &value, sizeof(value));
+	EXPECT_EQ(size, -1);
+	EXPECT_EQ(errno, EINVAL);
+
+	close(fd);
+}
+
+/*
+ * A read(2) fails with the error EINVAL if the size of the supplied buffer is
+ * less than 8 bytes.
+ */
+TEST(eventfd_check_read)
+{
+	uint64_t value;
+	ssize_t size;
+	int fd;
+
+	fd = sys_eventfd2(1, 0);
+	ASSERT_GE(fd, 0);
+
+	size = read(fd, &value, sizeof(int));
+	EXPECT_EQ(size, -1);
+	EXPECT_EQ(errno, EINVAL);
+
+	size = read(fd, &value, sizeof(value));
+	EXPECT_EQ(size, sizeof(value));
+	EXPECT_EQ(value, 1);
+
+	close(fd);
+}
+
+
+/*
+ * If EFD_SEMAPHORE was not specified and the eventfd counter has a nonzero
+ * value, then a read(2) returns 8 bytes containing that value, and the
+ * counter's value is reset to zero.
+ * If the eventfd counter is zero at the time of the call to read(2), then the
+ * call fails with the error EAGAIN if the file descriptor has been made nonblocking.
+ */
+TEST(eventfd_check_read_with_nonsemaphore)
+{
+	uint64_t value;
+	ssize_t size;
+	int fd;
+	int i;
+
+	fd = sys_eventfd2(0, EFD_NONBLOCK);
+	ASSERT_GE(fd, 0);
+
+	value = 1;
+	for (i = 0; i < EVENTFD_TEST_ITERATIONS; i++) {
+		size = write(fd, &value, sizeof(value));
+		EXPECT_EQ(size, sizeof(value));
+	}
+
+	size = read(fd, &value, sizeof(value));
+	EXPECT_EQ(size, sizeof(uint64_t));
+	EXPECT_EQ(value, EVENTFD_TEST_ITERATIONS);
+
+	size = read(fd, &value, sizeof(value));
+	EXPECT_EQ(size, -1);
+	EXPECT_EQ(errno, EAGAIN);
+
+	close(fd);
+}
+
+/*
+ * If EFD_SEMAPHORE was specified and the eventfd counter has a nonzero value,
+ * then a read(2) returns 8 bytes containing the value 1, and the counter's
+ * value is decremented by 1.
+ * If the eventfd counter is zero at the time of the call to read(2), then the
+ * call fails with the error EAGAIN if the file descriptor has been made nonblocking.
+ */
+TEST(eventfd_check_read_with_semaphore)
+{
+	uint64_t value;
+	ssize_t size;
+	int fd;
+	int i;
+
+	fd = sys_eventfd2(0, EFD_SEMAPHORE|EFD_NONBLOCK);
+	ASSERT_GE(fd, 0);
+
+	value = 1;
+	for (i = 0; i < EVENTFD_TEST_ITERATIONS; i++) {
+		size = write(fd, &value, sizeof(value));
+		EXPECT_EQ(size, sizeof(value));
+	}
+
+	for (i = 0; i < EVENTFD_TEST_ITERATIONS; i++) {
+		size = read(fd, &value, sizeof(value));
+		EXPECT_EQ(size, sizeof(value));
+		EXPECT_EQ(value, 1);
+	}
+
+	size = read(fd, &value, sizeof(value));
+	EXPECT_EQ(size, -1);
+	EXPECT_EQ(errno, EAGAIN);
 
 	close(fd);
 }

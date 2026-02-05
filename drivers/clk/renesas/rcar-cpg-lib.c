@@ -22,7 +22,7 @@
 
 #include "rcar-cpg-lib.h"
 
-spinlock_t cpg_lock;
+DEFINE_SPINLOCK(cpg_lock);
 
 void cpg_reg_modify(void __iomem *reg, u32 clear, u32 set)
 {
@@ -35,7 +35,7 @@ void cpg_reg_modify(void __iomem *reg, u32 clear, u32 set)
 	val |= set;
 	writel(val, reg);
 	spin_unlock_irqrestore(&cpg_lock, flags);
-};
+}
 
 static int cpg_simple_notifier_call(struct notifier_block *nb,
 				    unsigned long action, void *data)
@@ -206,4 +206,3 @@ struct clk * __init cpg_rpcd2_clk_register(const char *name,
 
 	return clk;
 }
-

@@ -236,7 +236,7 @@ found:
 	mutex_unlock(&op_mutex);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		simple_inode_init_ts(inode);
 		ent_oi = OP_I(inode);
 		ent_oi->type = ent_type;
@@ -471,4 +471,5 @@ static void __exit exit_openprom_fs(void)
 
 module_init(init_openprom_fs)
 module_exit(exit_openprom_fs)
+MODULE_DESCRIPTION("OpenPROM filesystem support");
 MODULE_LICENSE("GPL");

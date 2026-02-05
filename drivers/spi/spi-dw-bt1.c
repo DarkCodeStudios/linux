@@ -55,13 +55,15 @@ static int dw_spi_bt1_dirmap_create(struct spi_mem_dirmap_desc *desc)
 	    !dwsbt1->dws.mem_ops.supports_op(desc->mem, &desc->info.op_tmpl))
 		return -EOPNOTSUPP;
 
+	if (desc->info.op_tmpl.data.dir != SPI_MEM_DATA_IN)
+		return -EOPNOTSUPP;
+
 	/*
 	 * Make sure the requested region doesn't go out of the physically
-	 * mapped flash memory bounds and the operation is read-only.
+	 * mapped flash memory bounds.
 	 */
-	if (desc->info.offset + desc->info.length > dwsbt1->map_len ||
-	    desc->info.op_tmpl.data.dir != SPI_MEM_DATA_IN)
-		return -EOPNOTSUPP;
+	if (desc->info.offset + desc->info.length > dwsbt1->map_len)
+		return -EINVAL;
 
 	return 0;
 }
@@ -286,7 +288,7 @@ static int dw_spi_bt1_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(&pdev->dev);
 
-	ret = dw_spi_add_host(&pdev->dev, dws);
+	ret = dw_spi_add_controller(&pdev->dev, dws);
 	if (ret) {
 		pm_runtime_disable(&pdev->dev);
 		return ret;
@@ -301,7 +303,7 @@ static void dw_spi_bt1_remove(struct platform_device *pdev)
 {
 	struct dw_spi_bt1 *dwsbt1 = platform_get_drvdata(pdev);
 
-	dw_spi_remove_host(&dwsbt1->dws);
+	dw_spi_remove_controller(&dwsbt1->dws);
 
 	pm_runtime_disable(&pdev->dev);
 }
@@ -315,7 +317,7 @@ MODULE_DEVICE_TABLE(of, dw_spi_bt1_of_match);
 
 static struct platform_driver dw_spi_bt1_driver = {
 	.probe	= dw_spi_bt1_probe,
-	.remove_new = dw_spi_bt1_remove,
+	.remove = dw_spi_bt1_remove,
 	.driver	= {
 		.name		= "bt1-sys-ssi",
 		.of_match_table	= dw_spi_bt1_of_match,
@@ -326,4 +328,4 @@ module_platform_driver(dw_spi_bt1_driver);
 MODULE_AUTHOR("Serge Semin <Sergey.Semin@baikalelectronics.ru>");
 MODULE_DESCRIPTION("Baikal-T1 System Boot SPI Controller driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SPI_DW_CORE);
+MODULE_IMPORT_NS("SPI_DW_CORE");

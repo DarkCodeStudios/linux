@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <ucontext.h>
 #include <linux/ptrace.h>
-#include "../../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define RISCV_V_MAGIC		0x53465457
 #define DEFAULT_VALUE		2
@@ -51,7 +51,7 @@ static int vector_sigreturn(int data, void (*handler)(int, siginfo_t *, void *))
 
 	asm(".option push				\n\
 		.option		arch, +v		\n\
-		vsetivli	x0, 1, e32, ta, ma	\n\
+		vsetivli	x0, 1, e32, m1, ta, ma	\n\
 		vmv.s.x		v0, %1			\n\
 		# Generate SIGSEGV			\n\
 		lw		a0, 0(x0)		\n\

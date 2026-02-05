@@ -359,7 +359,7 @@ static void wake_up_reservation(struct ubifs_info *c)
 }
 
 /**
- * wake_up_reservation - add current task in queue or start queuing.
+ * add_or_start_queue - add current task in queue or start queuing.
  * @c: UBIFS file-system description object
  *
  * This function starts queuing if queuing is not started, otherwise adds
@@ -643,6 +643,7 @@ static void set_dent_cookie(struct ubifs_info *c, struct ubifs_dent_node *dent)
  * @inode: inode to update
  * @deletion: indicates a directory entry deletion i.e unlink or rmdir
  * @xent: non-zero if the directory entry is an extended attribute entry
+ * @in_orphan: indicates whether the @inode is in orphan list
  *
  * This function updates an inode by writing a directory entry (or extended
  * attribute entry), the inode itself, and the parent directory inode (or the
@@ -664,7 +665,7 @@ static void set_dent_cookie(struct ubifs_info *c, struct ubifs_dent_node *dent)
  */
 int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 		     const struct fscrypt_name *nm, const struct inode *inode,
-		     int deletion, int xent)
+		     int deletion, int xent, int in_orphan)
 {
 	int err, dlen, ilen, len, lnum, ino_offs, dent_offs, orphan_added = 0;
 	int aligned_dlen, aligned_ilen, sync = IS_DIRSYNC(dir);
@@ -750,7 +751,7 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 	if (err)
 		goto out_release;
 
-	if (last_reference) {
+	if (last_reference && !in_orphan) {
 		err = ubifs_add_orphan(c, inode->i_ino);
 		if (err) {
 			release_head(c, BASEHD);
@@ -806,6 +807,9 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 	if (err)
 		goto out_ro;
 
+	if (in_orphan && inode->i_nlink)
+		ubifs_delete_orphan(c, inode->i_ino);
+
 	finish_reservation(c);
 	spin_lock(&ui->ui_lock);
 	ui->synced_i_size = ui->ui_size;
@@ -841,14 +845,16 @@ out_ro:
  * @c: UBIFS file-system description object
  * @inode: inode the data node belongs to
  * @key: node key
- * @buf: buffer to write
+ * @folio: buffer to write
+ * @offset: offset to write at
  * @len: data length (must not exceed %UBIFS_BLOCK_SIZE)
  *
  * This function writes a data node to the journal. Returns %0 if the data node
  * was successfully written, and a negative error code in case of failure.
  */
 int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
-			 const union ubifs_key *key, const void *buf, int len)
+			 const union ubifs_key *key, struct folio *folio,
+			 size_t offset, int len)
 {
 	struct ubifs_data_node *data;
 	int err, lnum, offs, compr_type, out_len, compr_len, auth_len;
@@ -892,7 +898,8 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		compr_type = ui->compr_type;
 
 	out_len = compr_len = dlen - UBIFS_DATA_NODE_SZ;
-	ubifs_compress(c, buf, len, &data->data, &compr_len, &compr_type);
+	ubifs_compress_folio(c, folio, offset, len, &data->data, &compr_len,
+			     &compr_type);
 	ubifs_assert(c, compr_len <= UBIFS_BLOCK_SIZE);
 
 	if (encrypted) {
@@ -977,6 +984,13 @@ int ubifs_jnl_write_inode(struct ubifs_info *c, const struct inode *inode)
 
 	dbg_jnl("ino %lu, nlink %u", inode->i_ino, inode->i_nlink);
 
+	if (kill_xattrs && ui->xattr_cnt > ubifs_xattr_max_cnt(c)) {
+		ubifs_err(c, "Cannot delete inode, it has too many xattrs!");
+		err = -EPERM;
+		ubifs_ro_mode(c, err);
+		return err;
+	}
+
 	/*
 	 * If the inode is being deleted, do not write the attached data. No
 	 * need to synchronize the write-buffer either.
@@ -1007,12 +1021,6 @@ int ubifs_jnl_write_inode(struct ubifs_info *c, const struct inode *inode)
 		struct fscrypt_name nm = {0};
 		struct inode *xino;
 		struct ubifs_dent_node *xent, *pxent = NULL;
-
-		if (ui->xattr_cnt > ubifs_xattr_max_cnt(c)) {
-			err = -EPERM;
-			ubifs_err(c, "Cannot delete inode, it has too much xattrs!");
-			goto out_release;
-		}
 
 		lowest_xent_key(c, &key, inode->i_ino);
 		while (1) {
@@ -1336,6 +1344,7 @@ out_free:
  * @new_nm: new name of the new directory entry
  * @whiteout: whiteout inode
  * @sync: non-zero if the write-buffer has to be synchronized
+ * @delete_orphan: indicates an orphan entry deletion for @whiteout
  *
  * This function implements the re-name operation which may involve writing up
  * to 4 inodes(new inode, whiteout inode, old and new parent directory inodes)
@@ -1348,7 +1357,7 @@ int ubifs_jnl_rename(struct ubifs_info *c, const struct inode *old_dir,
 		     const struct inode *new_dir,
 		     const struct inode *new_inode,
 		     const struct fscrypt_name *new_nm,
-		     const struct inode *whiteout, int sync)
+		     const struct inode *whiteout, int sync, int delete_orphan)
 {
 	void *p;
 	union ubifs_key key;
@@ -1565,6 +1574,9 @@ int ubifs_jnl_rename(struct ubifs_info *c, const struct inode *old_dir,
 			goto out_ro;
 	}
 
+	if (delete_orphan)
+		ubifs_delete_orphan(c, whiteout->i_ino);
+
 	finish_reservation(c);
 	if (new_inode) {
 		mark_inode_clean(c, new_ui);
@@ -1616,7 +1628,7 @@ static int truncate_data_node(const struct ubifs_info *c, const struct inode *in
 	int err, dlen, compr_type, out_len, data_size;
 
 	out_len = le32_to_cpu(dn->size);
-	buf = kmalloc_array(out_len, WORST_COMPR_FACTOR, GFP_NOFS);
+	buf = kmalloc(out_len, GFP_NOFS);
 	if (!buf)
 		return -ENOMEM;
 

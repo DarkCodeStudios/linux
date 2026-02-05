@@ -34,6 +34,7 @@
 #include <asm/set_memory.h>
 #endif
 #include "amdgpu.h"
+#include "amdgpu_reset.h"
 #include <drm/drm_drv.h>
 #include <drm/ttm/ttm_tt.h>
 
@@ -77,8 +78,9 @@ static int amdgpu_gart_dummy_page_init(struct amdgpu_device *adev)
 
 	if (adev->dummy_page_addr)
 		return 0;
-	adev->dummy_page_addr = dma_map_page(&adev->pdev->dev, dummy_page, 0,
-					     PAGE_SIZE, DMA_BIDIRECTIONAL);
+	adev->dummy_page_addr = dma_map_page_attrs(&adev->pdev->dev, dummy_page, 0,
+							PAGE_SIZE, DMA_BIDIRECTIONAL,
+							DMA_ATTR_SKIP_CPU_SYNC);
 	if (dma_mapping_error(&adev->pdev->dev, adev->dummy_page_addr)) {
 		dev_err(&adev->pdev->dev, "Failed to DMA MAP the dummy page\n");
 		adev->dummy_page_addr = 0;
@@ -98,8 +100,9 @@ void amdgpu_gart_dummy_page_fini(struct amdgpu_device *adev)
 {
 	if (!adev->dummy_page_addr)
 		return;
-	dma_unmap_page(&adev->pdev->dev, adev->dummy_page_addr, PAGE_SIZE,
-		       DMA_BIDIRECTIONAL);
+	dma_unmap_page_attrs(&adev->pdev->dev, adev->dummy_page_addr, PAGE_SIZE,
+				DMA_BIDIRECTIONAL,
+				DMA_ATTR_SKIP_CPU_SYNC);
 	adev->dummy_page_addr = 0;
 }
 
@@ -299,7 +302,6 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 			int pages)
 {
 	unsigned t;
-	unsigned p;
 	int i, j;
 	u64 page_base;
 	/* Starting from VEGA10, system bit must be 0 to mean invalid. */
@@ -313,8 +315,7 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 		return;
 
 	t = offset / AMDGPU_GPU_PAGE_SIZE;
-	p = t / AMDGPU_GPU_PAGES_IN_CPU_PAGE;
-	for (i = 0; i < pages; i++, p++) {
+	for (i = 0; i < pages; i++) {
 		page_base = adev->dummy_page_addr;
 		if (!adev->gart.ptr)
 			continue;
@@ -325,10 +326,7 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 			page_base += AMDGPU_GPU_PAGE_SIZE;
 		}
 	}
-	mb();
-	amdgpu_device_flush_hdp(adev, NULL);
-	for_each_set_bit(i, adev->vmhubs_mask, AMDGPU_MAX_VMHUBS)
-		amdgpu_gmc_flush_gpu_tlb(adev, 0, i, 0);
+	amdgpu_gart_invalidate_tlb(adev);
 
 	drm_dev_exit(idx);
 }
@@ -366,6 +364,42 @@ void amdgpu_gart_map(struct amdgpu_device *adev, uint64_t offset,
 			page_base += AMDGPU_GPU_PAGE_SIZE;
 		}
 	}
+	drm_dev_exit(idx);
+}
+
+/**
+ * amdgpu_gart_map_vram_range - map VRAM pages into the GART page table
+ *
+ * @adev: amdgpu_device pointer
+ * @pa: physical address of the first page to be mapped
+ * @start_page: first page to map in the GART aperture
+ * @num_pages: number of pages to be mapped
+ * @flags: page table entry flags
+ * @dst: valid CPU address of GART table, cannot be null
+ *
+ * Binds a BO that is allocated in VRAM to the GART page table
+ * (all ASICs).
+ *
+ * Useful when a kernel BO is located in VRAM but
+ * needs to be accessed from the GART address space.
+ */
+void amdgpu_gart_map_vram_range(struct amdgpu_device *adev, uint64_t pa,
+				uint64_t start_page, uint64_t num_pages,
+				uint64_t flags, void *dst)
+{
+	u32 i, idx;
+
+	/* The SYSTEM flag indicates the pages aren't in VRAM. */
+	WARN_ON_ONCE(flags & AMDGPU_PTE_SYSTEM);
+
+	if (!drm_dev_enter(adev_to_drm(adev), &idx))
+		return;
+
+	for (i = 0; i < num_pages; ++i) {
+		amdgpu_gmc_set_pte_pde(adev, dst,
+			start_page + i, pa + AMDGPU_GPU_PAGE_SIZE * i, flags);
+	}
+
 	drm_dev_exit(idx);
 }
 
@@ -408,7 +442,10 @@ void amdgpu_gart_invalidate_tlb(struct amdgpu_device *adev)
 		return;
 
 	mb();
-	amdgpu_device_flush_hdp(adev, NULL);
+	if (down_read_trylock(&adev->reset_domain->sem)) {
+		amdgpu_device_flush_hdp(adev, NULL);
+		up_read(&adev->reset_domain->sem);
+	}
 	for_each_set_bit(i, adev->vmhubs_mask, AMDGPU_MAX_VMHUBS)
 		amdgpu_gmc_flush_gpu_tlb(adev, 0, i, 0);
 }

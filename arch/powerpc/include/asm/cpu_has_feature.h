@@ -2,7 +2,7 @@
 #ifndef __ASM_POWERPC_CPU_HAS_FEATURE_H
 #define __ASM_POWERPC_CPU_HAS_FEATURE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/bug.h>
 #include <asm/cputable.h>
@@ -24,9 +24,8 @@ static __always_inline bool cpu_has_feature(unsigned long feature)
 {
 	int i;
 
-#ifndef __clang__ /* clang can't cope with this */
 	BUILD_BUG_ON(!__builtin_constant_p(feature));
-#endif
+	BUILD_BUG_ON(__builtin_popcountl(feature) > 1);
 
 #ifdef CONFIG_JUMP_LABEL_FEATURE_CHECK_DEBUG
 	if (!static_key_feature_checks_initialized) {
@@ -52,5 +51,5 @@ static __always_inline bool cpu_has_feature(unsigned long feature)
 }
 #endif
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_POWERPC_CPU_HAS_FEATURE_H */

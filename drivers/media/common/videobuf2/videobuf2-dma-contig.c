@@ -258,6 +258,7 @@ static void *vb2_dc_alloc(struct vb2_buffer *vb,
 
 	if (ret) {
 		dev_err(dev, "dma alloc of size %lu failed\n", size);
+		put_device(buf->dev);
 		kfree(buf);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -854,8 +855,7 @@ int vb2_dma_contig_set_max_seg_size(struct device *dev, unsigned int size)
 		return -ENODEV;
 	}
 	if (dma_get_max_seg_size(dev) < size)
-		return dma_set_max_seg_size(dev, size);
-
+		dma_set_max_seg_size(dev, size);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vb2_dma_contig_set_max_seg_size);
@@ -863,4 +863,4 @@ EXPORT_SYMBOL_GPL(vb2_dma_contig_set_max_seg_size);
 MODULE_DESCRIPTION("DMA-contig memory handling routines for videobuf2");
 MODULE_AUTHOR("Pawel Osciak <pawel@osciak.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");

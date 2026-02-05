@@ -4,7 +4,6 @@
  * Copyright (C) 2013, 2021 Intel Corporation
  */
 
-#include <linux/acpi.h>
 #include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/bug.h>
@@ -14,15 +13,12 @@
 #include <linux/dmaengine.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/math64.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/slab.h>
@@ -30,12 +26,8 @@
 
 #include <linux/spi/spi.h>
 
+#include "internals.h"
 #include "spi-pxa2xx.h"
-
-MODULE_AUTHOR("Stephen Street");
-MODULE_DESCRIPTION("PXA2xx SSP SPI Controller");
-MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:pxa2xx-spi");
 
 #define TIMOUT_DFLT		1000
 
@@ -81,8 +73,9 @@ struct chip_data {
 #define LPSS_CAPS_CS_EN_MASK			(0xf << LPSS_CAPS_CS_EN_SHIFT)
 
 #define LPSS_PRIV_CLOCK_GATE 0x38
-#define LPSS_PRIV_CLOCK_GATE_CLK_CTL_MASK 0x3
-#define LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_ON 0x3
+#define LPSS_PRIV_CLOCK_GATE_CLK_CTL_MASK	0x3
+#define LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_ON	0x3
+#define LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_OFF	0x0
 
 struct lpss_config {
 	/* LPSS offset from drv_data->ioaddr */
@@ -99,7 +92,6 @@ struct lpss_config {
 	/* Chip select control */
 	unsigned cs_sel_shift;
 	unsigned cs_sel_mask;
-	unsigned cs_num;
 	/* Quirks */
 	unsigned cs_clk_stays_gated : 1;
 };
@@ -137,7 +129,6 @@ static const struct lpss_config lpss_platforms[] = {
 		.tx_threshold_hi = 224,
 		.cs_sel_shift = 2,
 		.cs_sel_mask = 1 << 2,
-		.cs_num = 2,
 	},
 	{	/* LPSS_SPT_SSP */
 		.offset = 0x200,
@@ -331,6 +322,20 @@ static void __lpss_ssp_write_priv(struct driver_data *drv_data,
 	writel(value, drv_data->lpss_base + offset);
 }
 
+static bool __lpss_ssp_update_priv(struct driver_data *drv_data, unsigned int offset,
+				   u32 mask, u32 value)
+{
+	u32 new, curr;
+
+	curr = __lpss_ssp_read_priv(drv_data, offset);
+	new = (curr & ~mask) | (value & mask);
+	if (new == curr)
+		return false;
+
+	__lpss_ssp_write_priv(drv_data, offset, new);
+	return true;
+}
+
 /*
  * lpss_ssp_setup - perform LPSS SSP specific setup
  * @drv_data: pointer to the driver private data
@@ -347,21 +352,16 @@ static void lpss_ssp_setup(struct driver_data *drv_data)
 	drv_data->lpss_base = drv_data->ssp->mmio_base + config->offset;
 
 	/* Enable software chip select control */
-	value = __lpss_ssp_read_priv(drv_data, config->reg_cs_ctrl);
-	value &= ~(LPSS_CS_CONTROL_SW_MODE | LPSS_CS_CONTROL_CS_HIGH);
-	value |= LPSS_CS_CONTROL_SW_MODE | LPSS_CS_CONTROL_CS_HIGH;
-	__lpss_ssp_write_priv(drv_data, config->reg_cs_ctrl, value);
+	value = LPSS_CS_CONTROL_SW_MODE | LPSS_CS_CONTROL_CS_HIGH;
+	__lpss_ssp_update_priv(drv_data, config->reg_cs_ctrl, value, value);
 
 	/* Enable multiblock DMA transfers */
 	if (drv_data->controller_info->enable_dma) {
-		__lpss_ssp_write_priv(drv_data, config->reg_ssp, 1);
+		__lpss_ssp_update_priv(drv_data, config->reg_ssp, BIT(0), BIT(0));
 
 		if (config->reg_general >= 0) {
-			value = __lpss_ssp_read_priv(drv_data,
-						     config->reg_general);
-			value |= LPSS_GENERAL_REG_RXTO_HOLDOFF_DISABLE;
-			__lpss_ssp_write_priv(drv_data,
-					      config->reg_general, value);
+			value = LPSS_GENERAL_REG_RXTO_HOLDOFF_DISABLE;
+			__lpss_ssp_update_priv(drv_data, config->reg_general, value, value);
 		}
 	}
 }
@@ -371,30 +371,19 @@ static void lpss_ssp_select_cs(struct spi_device *spi,
 {
 	struct driver_data *drv_data =
 		spi_controller_get_devdata(spi->controller);
-	u32 value, cs;
+	u32 cs;
 
-	if (!config->cs_sel_mask)
+	cs = spi_get_chipselect(spi, 0) << config->cs_sel_shift;
+	if (!__lpss_ssp_update_priv(drv_data, config->reg_cs_ctrl, config->cs_sel_mask, cs))
 		return;
 
-	value = __lpss_ssp_read_priv(drv_data, config->reg_cs_ctrl);
-
-	cs = spi_get_chipselect(spi, 0);
-	cs <<= config->cs_sel_shift;
-	if (cs != (value & config->cs_sel_mask)) {
-		/*
-		 * When switching another chip select output active the
-		 * output must be selected first and wait 2 ssp_clk cycles
-		 * before changing state to active. Otherwise a short
-		 * glitch will occur on the previous chip select since
-		 * output select is latched but state control is not.
-		 */
-		value &= ~config->cs_sel_mask;
-		value |= cs;
-		__lpss_ssp_write_priv(drv_data,
-				      config->reg_cs_ctrl, value);
-		ndelay(1000000000 /
-		       (drv_data->controller->max_speed_hz / 2));
-	}
+	/*
+	 * When switching another chip select output active the output must be
+	 * selected first and wait 2 ssp_clk cycles before changing state to
+	 * active. Otherwise a short glitch will occur on the previous chip
+	 * select since output select is latched but state control is not.
+	 */
+	ndelay(1000000000 / (drv_data->controller->max_speed_hz / 2));
 }
 
 static void lpss_ssp_cs_control(struct spi_device *spi, bool enable)
@@ -402,34 +391,27 @@ static void lpss_ssp_cs_control(struct spi_device *spi, bool enable)
 	struct driver_data *drv_data =
 		spi_controller_get_devdata(spi->controller);
 	const struct lpss_config *config;
-	u32 value;
+	u32 mask;
 
 	config = lpss_get_config(drv_data);
 
 	if (enable)
 		lpss_ssp_select_cs(spi, config);
 
-	value = __lpss_ssp_read_priv(drv_data, config->reg_cs_ctrl);
-	if (enable)
-		value &= ~LPSS_CS_CONTROL_CS_HIGH;
-	else
-		value |= LPSS_CS_CONTROL_CS_HIGH;
-	__lpss_ssp_write_priv(drv_data, config->reg_cs_ctrl, value);
+	mask = LPSS_CS_CONTROL_CS_HIGH;
+	__lpss_ssp_update_priv(drv_data, config->reg_cs_ctrl, mask, enable ? 0 : mask);
 	if (config->cs_clk_stays_gated) {
-		u32 clkgate;
-
 		/*
 		 * Changing CS alone when dynamic clock gating is on won't
 		 * actually flip CS at that time. This ruins SPI transfers
 		 * that specify delays, or have no data. Toggle the clock mode
 		 * to force on briefly to poke the CS pin to move.
 		 */
-		clkgate = __lpss_ssp_read_priv(drv_data, LPSS_PRIV_CLOCK_GATE);
-		value = (clkgate & ~LPSS_PRIV_CLOCK_GATE_CLK_CTL_MASK) |
-			LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_ON;
-
-		__lpss_ssp_write_priv(drv_data, LPSS_PRIV_CLOCK_GATE, value);
-		__lpss_ssp_write_priv(drv_data, LPSS_PRIV_CLOCK_GATE, clkgate);
+		mask = LPSS_PRIV_CLOCK_GATE_CLK_CTL_MASK;
+		if (__lpss_ssp_update_priv(drv_data, LPSS_PRIV_CLOCK_GATE, mask,
+					   LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_ON))
+			__lpss_ssp_update_priv(drv_data, LPSS_PRIV_CLOCK_GATE, mask,
+					       LPSS_PRIV_CLOCK_GATE_CLK_CTL_FORCE_OFF);
 	}
 }
 
@@ -1004,11 +986,8 @@ static int pxa2xx_spi_transfer_one(struct spi_controller *controller,
 	}
 
 	dma_thresh = SSCR1_RxTresh(RX_THRESH_DFLT) | SSCR1_TxTresh(TX_THRESH_DFLT);
-	dma_mapped = controller->can_dma &&
-		     controller->can_dma(controller, spi, transfer) &&
-		     controller->cur_msg_mapped;
+	dma_mapped = spi_xfer_is_dma_mapped(controller, spi, transfer);
 	if (dma_mapped) {
-
 		/* Ensure we have the correct interrupt handler */
 		drv_data->transfer_handler = pxa2xx_spi_dma_transfer;
 
@@ -1265,135 +1244,24 @@ static void cleanup(struct spi_device *spi)
 	kfree(chip);
 }
 
-static bool pxa2xx_spi_idma_filter(struct dma_chan *chan, void *param)
-{
-	return param == chan->device->dev;
-}
-
-static int
-pxa2xx_spi_init_ssp(struct platform_device *pdev, struct ssp_device *ssp, enum pxa_ssp_type type)
-{
-	struct device *dev = &pdev->dev;
-	struct resource *res;
-	int status;
-	u64 uid;
-
-	ssp->mmio_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-	if (IS_ERR(ssp->mmio_base))
-		return PTR_ERR(ssp->mmio_base);
-
-	ssp->phys_base = res->start;
-
-	ssp->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(ssp->clk))
-		return PTR_ERR(ssp->clk);
-
-	ssp->irq = platform_get_irq(pdev, 0);
-	if (ssp->irq < 0)
-		return ssp->irq;
-
-	ssp->type = type;
-	ssp->dev = dev;
-
-	status = acpi_dev_uid_to_integer(ACPI_COMPANION(dev), &uid);
-	if (status)
-		ssp->port_id = -1;
-	else
-		ssp->port_id = uid;
-
-	return 0;
-}
-
-static struct pxa2xx_spi_controller *
-pxa2xx_spi_init_pdata(struct platform_device *pdev)
-{
-	struct pxa2xx_spi_controller *pdata;
-	struct device *dev = &pdev->dev;
-	struct device *parent = dev->parent;
-	enum pxa_ssp_type type = SSP_UNDEFINED;
-	struct ssp_device *ssp = NULL;
-	const void *match;
-	bool is_lpss_priv;
-	u32 num_cs = 1;
-	int status;
-
-	is_lpss_priv = platform_get_resource_byname(pdev, IORESOURCE_MEM, "lpss_priv");
-
-	match = device_get_match_data(dev);
-	if (match)
-		type = (uintptr_t)match;
-	else if (is_lpss_priv) {
-		u32 value;
-
-		status = device_property_read_u32(dev, "intel,spi-pxa2xx-type", &value);
-		if (status)
-			return ERR_PTR(status);
-
-		type = (enum pxa_ssp_type)value;
-	} else {
-		ssp = pxa_ssp_request(pdev->id, pdev->name);
-		if (ssp) {
-			type = ssp->type;
-			pxa_ssp_free(ssp);
-		}
-	}
-
-	/* Validate the SSP type correctness */
-	if (!(type > SSP_UNDEFINED && type < SSP_MAX))
-		return ERR_PTR(-EINVAL);
-
-	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata)
-		return ERR_PTR(-ENOMEM);
-
-	/* Platforms with iDMA 64-bit */
-	if (is_lpss_priv) {
-		pdata->tx_param = parent;
-		pdata->rx_param = parent;
-		pdata->dma_filter = pxa2xx_spi_idma_filter;
-	}
-
-	/* Read number of chip select pins, if provided */
-	device_property_read_u32(dev, "num-cs", &num_cs);
-
-	pdata->num_chipselect = num_cs;
-	pdata->is_target = device_property_read_bool(dev, "spi-slave");
-	pdata->enable_dma = true;
-	pdata->dma_burst_size = 1;
-
-	/* If SSP has been already enumerated, use it */
-	if (ssp)
-		return pdata;
-
-	status = pxa2xx_spi_init_ssp(pdev, &pdata->ssp, type);
-	if (status)
-		return ERR_PTR(status);
-
-	return pdata;
-}
-
 static int pxa2xx_spi_fw_translate_cs(struct spi_controller *controller,
 				      unsigned int cs)
 {
 	struct driver_data *drv_data = spi_controller_get_devdata(controller);
 
-	if (has_acpi_companion(drv_data->ssp->dev)) {
-		switch (drv_data->ssp_type) {
-		/*
-		 * For Atoms the ACPI DeviceSelection used by the Windows
-		 * driver starts from 1 instead of 0 so translate it here
-		 * to match what Linux expects.
-		 */
-		case LPSS_BYT_SSP:
-		case LPSS_BSW_SSP:
-			return cs - 1;
+	switch (drv_data->ssp_type) {
+	/*
+	 * For some of Intel Atoms the ACPI DeviceSelection used by the Windows
+	 * driver starts from 1 instead of 0 so translate it here to match what
+	 * Linux expects.
+	 */
+	case LPSS_BYT_SSP:
+	case LPSS_BSW_SSP:
+		return cs - 1;
 
-		default:
-			break;
-		}
+	default:
+		return cs;
 	}
-
-	return cs;
 }
 
 static size_t pxa2xx_spi_max_dma_transfer_size(struct spi_device *spi)
@@ -1401,41 +1269,22 @@ static size_t pxa2xx_spi_max_dma_transfer_size(struct spi_device *spi)
 	return MAX_DMA_LEN;
 }
 
-static int pxa2xx_spi_probe(struct platform_device *pdev)
+int pxa2xx_spi_probe(struct device *dev, struct ssp_device *ssp,
+		     struct pxa2xx_spi_controller *platform_info)
 {
-	struct device *dev = &pdev->dev;
-	struct pxa2xx_spi_controller *platform_info;
 	struct spi_controller *controller;
 	struct driver_data *drv_data;
-	struct ssp_device *ssp;
 	const struct lpss_config *config;
 	int status;
 	u32 tmp;
-
-	platform_info = dev_get_platdata(dev);
-	if (!platform_info) {
-		platform_info = pxa2xx_spi_init_pdata(pdev);
-		if (IS_ERR(platform_info))
-			return dev_err_probe(dev, PTR_ERR(platform_info), "missing platform data\n");
-	}
-	dev_dbg(dev, "DMA burst size set to %u\n", platform_info->dma_burst_size);
-
-	ssp = pxa_ssp_request(pdev->id, pdev->name);
-	if (!ssp)
-		ssp = &platform_info->ssp;
-
-	if (!ssp->mmio_base)
-		return dev_err_probe(dev, -ENODEV, "failed to get SSP\n");
 
 	if (platform_info->is_target)
 		controller = devm_spi_alloc_target(dev, sizeof(*drv_data));
 	else
 		controller = devm_spi_alloc_host(dev, sizeof(*drv_data));
+	if (!controller)
+		return -ENOMEM;
 
-	if (!controller) {
-		status = dev_err_probe(dev, -ENOMEM, "cannot alloc spi_controller\n");
-		goto out_error_controller_alloc;
-	}
 	drv_data = spi_controller_get_devdata(controller);
 	drv_data->controller = controller;
 	drv_data->controller_info = platform_info;
@@ -1486,10 +1335,8 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 
 	status = request_irq(ssp->irq, ssp_int, IRQF_SHARED, dev_name(dev),
 			drv_data);
-	if (status < 0) {
-		dev_err_probe(dev, status, "cannot get IRQ %d\n", ssp->irq);
-		goto out_error_controller_alloc;
-	}
+	if (status < 0)
+		return dev_err_probe(dev, status, "cannot get IRQ %d\n", ssp->irq);
 
 	/* Setup DMA if requested */
 	if (platform_info->enable_dma) {
@@ -1502,6 +1349,8 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 			controller->max_dma_len = MAX_DMA_LEN;
 			controller->max_transfer_size =
 				pxa2xx_spi_max_dma_transfer_size;
+
+			dev_dbg(dev, "DMA burst size set to %u\n", platform_info->dma_burst_size);
 		}
 	}
 
@@ -1578,8 +1427,6 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 			tmp &= LPSS_CAPS_CS_EN_MASK;
 			tmp >>= LPSS_CAPS_CS_EN_SHIFT;
 			platform_info->num_chipselect = ffz(tmp);
-		} else if (config->cs_num) {
-			platform_info->num_chipselect = config->cs_num;
 		}
 	}
 	controller->num_chipselect = platform_info->num_chipselect;
@@ -1594,23 +1441,15 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 		}
 	}
 
-	pm_runtime_set_autosuspend_delay(&pdev->dev, 50);
-	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_set_active(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-
 	/* Register with the SPI framework */
-	platform_set_drvdata(pdev, drv_data);
+	dev_set_drvdata(dev, drv_data);
 	status = spi_register_controller(controller);
 	if (status) {
 		dev_err_probe(dev, status, "problem registering SPI controller\n");
-		goto out_error_pm_runtime_enabled;
+		goto out_error_clock_enabled;
 	}
 
 	return status;
-
-out_error_pm_runtime_enabled:
-	pm_runtime_disable(&pdev->dev);
 
 out_error_clock_enabled:
 	clk_disable_unprepare(ssp->clk);
@@ -1619,17 +1458,14 @@ out_error_dma_irq_alloc:
 	pxa2xx_spi_dma_release(drv_data);
 	free_irq(ssp->irq, drv_data);
 
-out_error_controller_alloc:
-	pxa_ssp_free(ssp);
 	return status;
 }
+EXPORT_SYMBOL_NS_GPL(pxa2xx_spi_probe, "SPI_PXA2xx");
 
-static void pxa2xx_spi_remove(struct platform_device *pdev)
+void pxa2xx_spi_remove(struct device *dev)
 {
-	struct driver_data *drv_data = platform_get_drvdata(pdev);
+	struct driver_data *drv_data = dev_get_drvdata(dev);
 	struct ssp_device *ssp = drv_data->ssp;
-
-	pm_runtime_get_sync(&pdev->dev);
 
 	spi_unregister_controller(drv_data->controller);
 
@@ -1641,15 +1477,10 @@ static void pxa2xx_spi_remove(struct platform_device *pdev)
 	if (drv_data->controller_info->enable_dma)
 		pxa2xx_spi_dma_release(drv_data);
 
-	pm_runtime_put_noidle(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
-
 	/* Release IRQ */
 	free_irq(ssp->irq, drv_data);
-
-	/* Release SSP */
-	pxa_ssp_free(ssp);
 }
+EXPORT_SYMBOL_NS_GPL(pxa2xx_spi_remove, "SPI_PXA2xx");
 
 static int pxa2xx_spi_suspend(struct device *dev)
 {
@@ -1701,49 +1532,11 @@ static int pxa2xx_spi_runtime_resume(struct device *dev)
 	return clk_prepare_enable(drv_data->ssp->clk);
 }
 
-static const struct dev_pm_ops pxa2xx_spi_pm_ops = {
+EXPORT_NS_GPL_DEV_PM_OPS(pxa2xx_spi_pm_ops, SPI_PXA2xx) = {
 	SYSTEM_SLEEP_PM_OPS(pxa2xx_spi_suspend, pxa2xx_spi_resume)
 	RUNTIME_PM_OPS(pxa2xx_spi_runtime_suspend, pxa2xx_spi_runtime_resume, NULL)
 };
 
-static const struct acpi_device_id pxa2xx_spi_acpi_match[] = {
-	{ "80860F0E", LPSS_BYT_SSP },
-	{ "8086228E", LPSS_BSW_SSP },
-	{ "INT33C0", LPSS_LPT_SSP },
-	{ "INT33C1", LPSS_LPT_SSP },
-	{ "INT3430", LPSS_LPT_SSP },
-	{ "INT3431", LPSS_LPT_SSP },
-	{}
-};
-MODULE_DEVICE_TABLE(acpi, pxa2xx_spi_acpi_match);
-
-static const struct of_device_id pxa2xx_spi_of_match[] = {
-	{ .compatible = "marvell,mmp2-ssp", .data = (void *)MMP2_SSP },
-	{}
-};
-MODULE_DEVICE_TABLE(of, pxa2xx_spi_of_match);
-
-static struct platform_driver driver = {
-	.driver = {
-		.name	= "pxa2xx-spi",
-		.pm	= pm_ptr(&pxa2xx_spi_pm_ops),
-		.acpi_match_table = pxa2xx_spi_acpi_match,
-		.of_match_table = pxa2xx_spi_of_match,
-	},
-	.probe = pxa2xx_spi_probe,
-	.remove_new = pxa2xx_spi_remove,
-};
-
-static int __init pxa2xx_spi_init(void)
-{
-	return platform_driver_register(&driver);
-}
-subsys_initcall(pxa2xx_spi_init);
-
-static void __exit pxa2xx_spi_exit(void)
-{
-	platform_driver_unregister(&driver);
-}
-module_exit(pxa2xx_spi_exit);
-
-MODULE_SOFTDEP("pre: dw_dmac");
+MODULE_AUTHOR("Stephen Street");
+MODULE_DESCRIPTION("PXA2xx SSP SPI Controller core driver");
+MODULE_LICENSE("GPL");

@@ -25,8 +25,9 @@
 #ifndef DRM_FIXED_H
 #define DRM_FIXED_H
 
-#include <linux/kernel.h>
 #include <linux/math64.h>
+#include <linux/types.h>
+#include <linux/wordpart.h>
 
 typedef union dfixed {
 	u32 full;
@@ -76,6 +77,23 @@ static inline u32 dfixed_div(fixed20_12 A, fixed20_12 B)
 #define DRM_FIXED_DIGITS_MASK	(~DRM_FIXED_DECIMAL_MASK)
 #define DRM_FIXED_EPSILON	1LL
 #define DRM_FIXED_ALMOST_ONE	(DRM_FIXED_ONE - DRM_FIXED_EPSILON)
+
+/**
+ * @drm_sm2fixp
+ *
+ * Convert a 1.31.32 signed-magnitude fixed point to 32.32
+ * 2s-complement fixed point
+ *
+ * @return s64 2s-complement fixed point
+ */
+static inline s64 drm_sm2fixp(__u64 a)
+{
+	if ((a & (1LL << 63))) {
+		return -(a & 0x7fffffffffffffffll);
+	} else {
+		return a;
+	}
+}
 
 static inline s64 drm_int2fixp(int a)
 {
@@ -213,5 +231,28 @@ static inline s64 drm_fixp_exp(s64 x)
 
 	return sum;
 }
+
+static inline int fxp_q4_from_int(int val_int)
+{
+	return val_int << 4;
+}
+
+static inline int fxp_q4_to_int(int val_q4)
+{
+	return val_q4 >> 4;
+}
+
+static inline int fxp_q4_to_int_roundup(int val_q4)
+{
+	return (val_q4 + 0xf) >> 4;
+}
+
+static inline int fxp_q4_to_frac(int val_q4)
+{
+	return val_q4 & 0xf;
+}
+
+#define FXP_Q4_FMT		"%d.%04d"
+#define FXP_Q4_ARGS(val_q4)	fxp_q4_to_int(val_q4), (fxp_q4_to_frac(val_q4) * 625)
 
 #endif

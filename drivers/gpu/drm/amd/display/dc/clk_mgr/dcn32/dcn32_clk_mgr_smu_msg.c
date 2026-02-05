@@ -28,7 +28,7 @@
 #include "clk_mgr_internal.h"
 #include "reg_helper.h"
 #include "dalsmc.h"
-#include "smu13_driver_if.h"
+#include "dcn32_smu13_driver_if.h"
 
 #define mmDAL_MSG_REG  0x1628A
 #define mmDAL_ARG_REG  0x16273
@@ -63,7 +63,8 @@ static uint32_t dcn32_smu_wait_for_response(struct clk_mgr_internal *clk_mgr, un
 			udelay(delay_us);
 	} while (max_retries--);
 
-	TRACE_SMU_DELAY(delay_us * (initial_max_retries - max_retries), clk_mgr->base.ctx);
+	TRACE_SMU_MSG_DELAY(0, 0, delay_us * (initial_max_retries - max_retries), clk_mgr->base.ctx);
+
 
 	return reg;
 }
@@ -120,7 +121,7 @@ static uint32_t dcn32_smu_wait_for_response_delay(struct clk_mgr_internal *clk_m
 		*total_delay_us += delay_us;
 	} while (max_retries--);
 
-	TRACE_SMU_DELAY(*total_delay_us, clk_mgr->base.ctx);
+	TRACE_SMU_MSG_DELAY(0, 0, *total_delay_us, clk_mgr->base.ctx);
 
 	return reg;
 }

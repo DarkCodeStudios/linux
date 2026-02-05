@@ -7,11 +7,12 @@
 
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/error-injection.h>
 
 #include <drm/drm_managed.h>
 
+#include "xe_assert.h"
 #include "xe_device.h"
-#include "xe_gt.h"
 #include "xe_mmio.h"
 #include "xe_pcode_api.h"
 
@@ -29,107 +30,133 @@
  * - PCODE for display operations
  */
 
-static int pcode_mailbox_status(struct xe_gt *gt)
+static int pcode_mailbox_status(struct xe_tile *tile)
 {
+	const char *err_str;
+	int err_decode;
 	u32 err;
-	static const struct pcode_err_decode err_decode[] = {
-		[PCODE_ILLEGAL_CMD] = {-ENXIO, "Illegal Command"},
-		[PCODE_TIMEOUT] = {-ETIMEDOUT, "Timed out"},
-		[PCODE_ILLEGAL_DATA] = {-EINVAL, "Illegal Data"},
-		[PCODE_ILLEGAL_SUBCOMMAND] = {-ENXIO, "Illegal Subcommand"},
-		[PCODE_LOCKED] = {-EBUSY, "PCODE Locked"},
-		[PCODE_GT_RATIO_OUT_OF_RANGE] = {-EOVERFLOW,
-			"GT ratio out of range"},
-		[PCODE_REJECTED] = {-EACCES, "PCODE Rejected"},
-		[PCODE_ERROR_MASK] = {-EPROTO, "Unknown"},
-	};
 
-	err = xe_mmio_read32(gt, PCODE_MAILBOX) & PCODE_ERROR_MASK;
+#define CASE_ERR(_err, _err_decode, _err_str)	\
+	case _err:				\
+		err_decode = _err_decode;	\
+		err_str = _err_str;		\
+		break
+
+	err = xe_mmio_read32(&tile->mmio, PCODE_MAILBOX) & PCODE_ERROR_MASK;
+	switch (err) {
+	CASE_ERR(PCODE_ILLEGAL_CMD,           -ENXIO,     "Illegal Command");
+	CASE_ERR(PCODE_TIMEOUT,               -ETIMEDOUT, "Timed out");
+	CASE_ERR(PCODE_ILLEGAL_DATA,          -EINVAL,    "Illegal Data");
+	CASE_ERR(PCODE_ILLEGAL_SUBCOMMAND,    -ENXIO,     "Illegal Subcommand");
+	CASE_ERR(PCODE_LOCKED,                -EBUSY,     "PCODE Locked");
+	CASE_ERR(PCODE_GT_RATIO_OUT_OF_RANGE, -EOVERFLOW, "GT ratio out of range");
+	CASE_ERR(PCODE_REJECTED,              -EACCES,    "PCODE Rejected");
+	default:
+		err_decode = -EPROTO;
+		err_str = "Unknown";
+	}
+
 	if (err) {
-		drm_err(&gt_to_xe(gt)->drm, "PCODE Mailbox failed: %d %s", err,
-			err_decode[err].str ?: "Unknown");
-		return err_decode[err].errno ?: -EPROTO;
+		drm_err(&tile_to_xe(tile)->drm, "PCODE Mailbox failed: %d %s",
+			err_decode, err_str);
+
+		return err_decode;
 	}
 
 	return 0;
+#undef CASE_ERR
 }
 
-static int __pcode_mailbox_rw(struct xe_gt *gt, u32 mbox, u32 *data0, u32 *data1,
+static int __pcode_mailbox_rw(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1,
 			      unsigned int timeout_ms, bool return_data,
 			      bool atomic)
 {
+	struct xe_mmio *mmio = &tile->mmio;
 	int err;
 
-	if (gt_to_xe(gt)->info.skip_pcode)
+	if (tile_to_xe(tile)->info.skip_pcode)
 		return 0;
 
-	if ((xe_mmio_read32(gt, PCODE_MAILBOX) & PCODE_READY) != 0)
+	if ((xe_mmio_read32(mmio, PCODE_MAILBOX) & PCODE_READY) != 0)
 		return -EAGAIN;
 
-	xe_mmio_write32(gt, PCODE_DATA0, *data0);
-	xe_mmio_write32(gt, PCODE_DATA1, data1 ? *data1 : 0);
-	xe_mmio_write32(gt, PCODE_MAILBOX, PCODE_READY | mbox);
+	xe_mmio_write32(mmio, PCODE_DATA0, *data0);
+	xe_mmio_write32(mmio, PCODE_DATA1, data1 ? *data1 : 0);
+	xe_mmio_write32(mmio, PCODE_MAILBOX, PCODE_READY | mbox);
 
-	err = xe_mmio_wait32(gt, PCODE_MAILBOX, PCODE_READY, 0,
+	err = xe_mmio_wait32(mmio, PCODE_MAILBOX, PCODE_READY, 0,
 			     timeout_ms * USEC_PER_MSEC, NULL, atomic);
 	if (err)
 		return err;
 
 	if (return_data) {
-		*data0 = xe_mmio_read32(gt, PCODE_DATA0);
+		*data0 = xe_mmio_read32(mmio, PCODE_DATA0);
 		if (data1)
-			*data1 = xe_mmio_read32(gt, PCODE_DATA1);
+			*data1 = xe_mmio_read32(mmio, PCODE_DATA1);
 	}
 
-	return pcode_mailbox_status(gt);
+	return pcode_mailbox_status(tile);
 }
 
-static int pcode_mailbox_rw(struct xe_gt *gt, u32 mbox, u32 *data0, u32 *data1,
+static int pcode_mailbox_rw(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1,
 			    unsigned int timeout_ms, bool return_data,
 			    bool atomic)
 {
-	if (gt_to_xe(gt)->info.skip_pcode)
+	if (tile_to_xe(tile)->info.skip_pcode)
 		return 0;
 
-	lockdep_assert_held(&gt->pcode.lock);
+	lockdep_assert_held(&tile->pcode.lock);
 
-	return __pcode_mailbox_rw(gt, mbox, data0, data1, timeout_ms, return_data, atomic);
+	return __pcode_mailbox_rw(tile, mbox, data0, data1, timeout_ms, return_data, atomic);
 }
 
-int xe_pcode_write_timeout(struct xe_gt *gt, u32 mbox, u32 data, int timeout)
+int xe_pcode_write_timeout(struct xe_tile *tile, u32 mbox, u32 data, int timeout)
 {
 	int err;
 
-	mutex_lock(&gt->pcode.lock);
-	err = pcode_mailbox_rw(gt, mbox, &data, NULL, timeout, false, false);
-	mutex_unlock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
+	err = pcode_mailbox_rw(tile, mbox, &data, NULL, timeout, false, false);
+	mutex_unlock(&tile->pcode.lock);
 
 	return err;
 }
 
-int xe_pcode_read(struct xe_gt *gt, u32 mbox, u32 *val, u32 *val1)
+int xe_pcode_write64_timeout(struct xe_tile *tile, u32 mbox, u32 data0, u32 data1, int timeout)
 {
 	int err;
 
-	mutex_lock(&gt->pcode.lock);
-	err = pcode_mailbox_rw(gt, mbox, val, val1, 1, true, false);
-	mutex_unlock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
+	err = pcode_mailbox_rw(tile, mbox, &data0, &data1, timeout, false, false);
+	mutex_unlock(&tile->pcode.lock);
 
 	return err;
 }
 
-static int pcode_try_request(struct xe_gt *gt, u32 mbox,
+int xe_pcode_read(struct xe_tile *tile, u32 mbox, u32 *val, u32 *val1)
+{
+	int err;
+
+	mutex_lock(&tile->pcode.lock);
+	err = pcode_mailbox_rw(tile, mbox, val, val1, 1, true, false);
+	mutex_unlock(&tile->pcode.lock);
+
+	return err;
+}
+
+static int pcode_try_request(struct xe_tile *tile, u32 mbox,
 			     u32 request, u32 reply_mask, u32 reply,
 			     u32 *status, bool atomic, int timeout_us, bool locked)
 {
 	int slept, wait = 10;
 
+	xe_tile_assert(tile, timeout_us > 0);
+
 	for (slept = 0; slept < timeout_us; slept += wait) {
 		if (locked)
-			*status = pcode_mailbox_rw(gt, mbox, &request, NULL, 1, true,
+			*status = pcode_mailbox_rw(tile, mbox, &request, NULL, 1, true,
 						   atomic);
 		else
-			*status = __pcode_mailbox_rw(gt, mbox, &request, NULL, 1, true,
+			*status = __pcode_mailbox_rw(tile, mbox, &request, NULL, 1, true,
 						     atomic);
 		if ((*status == 0) && ((request & reply_mask) == reply))
 			return 0;
@@ -146,7 +173,7 @@ static int pcode_try_request(struct xe_gt *gt, u32 mbox,
 
 /**
  * xe_pcode_request - send PCODE request until acknowledgment
- * @gt: gt
+ * @tile: tile
  * @mbox: PCODE mailbox ID the request is targeted for
  * @request: request ID
  * @reply_mask: mask used to check for request acknowledgment
@@ -163,15 +190,17 @@ static int pcode_try_request(struct xe_gt *gt, u32 mbox,
  * Returns 0 on success, %-ETIMEDOUT in case of a timeout, <0 in case of some
  * other error as reported by PCODE.
  */
-int xe_pcode_request(struct xe_gt *gt, u32 mbox, u32 request,
-		      u32 reply_mask, u32 reply, int timeout_base_ms)
+int xe_pcode_request(struct xe_tile *tile, u32 mbox, u32 request,
+		     u32 reply_mask, u32 reply, int timeout_base_ms)
 {
 	u32 status;
 	int ret;
 
-	mutex_lock(&gt->pcode.lock);
+	xe_tile_assert(tile, timeout_base_ms <= 3);
 
-	ret = pcode_try_request(gt, mbox, request, reply_mask, reply, &status,
+	mutex_lock(&tile->pcode.lock);
+
+	ret = pcode_try_request(tile, mbox, request, reply_mask, reply, &status,
 				false, timeout_base_ms * 1000, true);
 	if (!ret)
 		goto out;
@@ -186,21 +215,20 @@ int xe_pcode_request(struct xe_gt *gt, u32 mbox, u32 request,
 	 * requests, and for any quirks of the PCODE firmware that delays
 	 * the request completion.
 	 */
-	drm_err(&gt_to_xe(gt)->drm,
+	drm_err(&tile_to_xe(tile)->drm,
 		"PCODE timeout, retrying with preemption disabled\n");
-	drm_WARN_ON_ONCE(&gt_to_xe(gt)->drm, timeout_base_ms > 1);
 	preempt_disable();
-	ret = pcode_try_request(gt, mbox, request, reply_mask, reply, &status,
+	ret = pcode_try_request(tile, mbox, request, reply_mask, reply, &status,
 				true, 50 * 1000, true);
 	preempt_enable();
 
 out:
-	mutex_unlock(&gt->pcode.lock);
+	mutex_unlock(&tile->pcode.lock);
 	return status ? status : ret;
 }
 /**
  * xe_pcode_init_min_freq_table - Initialize PCODE's QOS frequency table
- * @gt: gt instance
+ * @tile: tile instance
  * @min_gt_freq: Minimal (RPn) GT frequency in units of 50MHz.
  * @max_gt_freq: Maximal (RP0) GT frequency in units of 50MHz.
  *
@@ -213,7 +241,7 @@ out:
  *
  * It returns 0 on success, and -ERROR number on failure, -EINVAL if max
  * frequency is higher then the minimal, and other errors directly translated
- * from the PCODE Error returs:
+ * from the PCODE Error returns:
  * - -ENXIO: "Illegal Command"
  * - -ETIMEDOUT: "Timed out"
  * - -EINVAL: "Illegal Data"
@@ -223,30 +251,30 @@ out:
  * - -EACCES, "PCODE Rejected"
  * - -EPROTO, "Unknown"
  */
-int xe_pcode_init_min_freq_table(struct xe_gt *gt, u32 min_gt_freq,
+int xe_pcode_init_min_freq_table(struct xe_tile *tile, u32 min_gt_freq,
 				 u32 max_gt_freq)
 {
 	int ret;
 	u32 freq;
 
-	if (!gt_to_xe(gt)->info.has_llc)
+	if (!tile_to_xe(tile)->info.has_llc)
 		return 0;
 
 	if (max_gt_freq <= min_gt_freq)
 		return -EINVAL;
 
-	mutex_lock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
 	for (freq = min_gt_freq; freq <= max_gt_freq; freq++) {
 		u32 data = freq << PCODE_FREQ_RING_RATIO_SHIFT | freq;
 
-		ret = pcode_mailbox_rw(gt, PCODE_WRITE_MIN_FREQ_TABLE,
+		ret = pcode_mailbox_rw(tile, PCODE_WRITE_MIN_FREQ_TABLE,
 				       &data, NULL, 1, false, false);
 		if (ret)
 			goto unlock;
 	}
 
 unlock:
-	mutex_unlock(&gt->pcode.lock);
+	mutex_unlock(&tile->pcode.lock);
 	return ret;
 }
 
@@ -266,7 +294,7 @@ unlock:
 int xe_pcode_ready(struct xe_device *xe, bool locked)
 {
 	u32 status, request = DGFX_GET_INIT_STATUS;
-	struct xe_gt *gt = xe_root_mmio_gt(xe);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
 	int timeout_us = 180000000; /* 3 min */
 	int ret;
 
@@ -277,15 +305,15 @@ int xe_pcode_ready(struct xe_device *xe, bool locked)
 		return 0;
 
 	if (locked)
-		mutex_lock(&gt->pcode.lock);
+		mutex_lock(&tile->pcode.lock);
 
-	ret = pcode_try_request(gt, DGFX_PCODE_STATUS, request,
+	ret = pcode_try_request(tile, DGFX_PCODE_STATUS, request,
 				DGFX_INIT_STATUS_COMPLETE,
 				DGFX_INIT_STATUS_COMPLETE,
 				&status, false, timeout_us, locked);
 
 	if (locked)
-		mutex_unlock(&gt->pcode.lock);
+		mutex_unlock(&tile->pcode.lock);
 
 	if (ret)
 		drm_err(&xe->drm,
@@ -296,14 +324,14 @@ int xe_pcode_ready(struct xe_device *xe, bool locked)
 
 /**
  * xe_pcode_init: initialize components of PCODE
- * @gt: gt instance
+ * @tile: tile instance
  *
  * This function initializes the xe_pcode component.
  * To be called once only during probe.
  */
-void xe_pcode_init(struct xe_gt *gt)
+void xe_pcode_init(struct xe_tile *tile)
 {
-	drmm_mutex_init(&gt_to_xe(gt)->drm, &gt->pcode.lock);
+	drmm_mutex_init(&tile_to_xe(tile)->drm, &tile->pcode.lock);
 }
 
 /**
@@ -319,3 +347,34 @@ int xe_pcode_probe_early(struct xe_device *xe)
 {
 	return xe_pcode_ready(xe, false);
 }
+ALLOW_ERROR_INJECTION(xe_pcode_probe_early, ERRNO); /* See xe_pci_probe */
+
+/* Helpers with drm device. These should only be called by the display side */
+#if IS_ENABLED(CONFIG_DRM_XE_DISPLAY)
+
+int intel_pcode_read(struct drm_device *drm, u32 mbox, u32 *val, u32 *val1)
+{
+	struct xe_device *xe = to_xe_device(drm);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+
+	return xe_pcode_read(tile, mbox, val, val1);
+}
+
+int intel_pcode_write_timeout(struct drm_device *drm, u32 mbox, u32 val, int timeout_ms)
+{
+	struct xe_device *xe = to_xe_device(drm);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+
+	return xe_pcode_write_timeout(tile, mbox, val, timeout_ms);
+}
+
+int intel_pcode_request(struct drm_device *drm, u32 mbox, u32 request,
+			u32 reply_mask, u32 reply, int timeout_base_ms)
+{
+	struct xe_device *xe = to_xe_device(drm);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+
+	return xe_pcode_request(tile, mbox, request, reply_mask, reply, timeout_base_ms);
+}
+
+#endif
